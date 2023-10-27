@@ -1,0 +1,17 @@
+[package]
+name = "llama-cpp-sys"
+version = "0.1.0"
+edition = "2021"
+authors = ["Janosch Gräf <janosch.graef@gmail.com>"]
+links = "llama"
+
+[dependencies]
+
+[build-dependencies]
+bindgen = "0.68.1"
+cmake = "0.1"
+
+[features]
+default = []
+avx = []
+avx2 = []

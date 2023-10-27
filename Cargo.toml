@@ -1,0 +1,7 @@
+[workspace]
+members = [
+  "llama-cpp",
+  "llama-cpp-cli",
+  "llama-cpp-sys",
+]
+resolver = "2"

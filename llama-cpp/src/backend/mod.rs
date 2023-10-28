@@ -33,8 +33,6 @@ lazy_static! {
     pub static ref DEFAULT_N_THREADS: u32 = num_cpus::get_physical() as u32;
 }
 
-static LLAMA_INIT: Once = Once::new();
-
 unsafe extern "C" fn llama_log_callback(
     level: llama_cpp_sys::ggml_log_level,
     text: *const c_char,
@@ -58,21 +56,27 @@ unsafe extern "C" fn llama_log_callback(
     }
 }
 
-pub fn llama_init() {
+static LLAMA_INIT: Once = Once::new();
+
+pub(self) fn llama_init() {
     LLAMA_INIT.call_once(|| {
-        // run initialization here
         unsafe {
-            llama_cpp_sys::llama_log_set(Some(llama_log_callback), ptr::null_mut());
+            // initialize llama.cpp backend
             llama_cpp_sys::llama_backend_init(false);
+
+            // set log callback to use tracing
+            llama_cpp_sys::llama_log_set(Some(llama_log_callback), ptr::null_mut());
         }
     });
 }
 
+static SYSTEM_INFO_MUTEX: Mutex<()> = Mutex::new(());
+
 pub fn system_info() -> String {
     // the system info function writes to a static buffer, so we need to lock.
-    const SYSTEM_INFO_MUTEX: Mutex<()> = Mutex::new(());
-    let mutex = SYSTEM_INFO_MUTEX;
-    let _guard = mutex.lock().expect("system info mutex poisened");
+    let _guard = SYSTEM_INFO_MUTEX
+        .lock()
+        .expect("system info mutex poisened");
 
     let info = unsafe { CStr::from_ptr(llama_cpp_sys::llama_print_system_info()) };
 
@@ -81,7 +85,7 @@ pub fn system_info() -> String {
         .to_owned()
 }
 
-pub fn ffi_path(path: impl AsRef<Path>) -> Result<CString, Error> {
+pub(self) fn ffi_path(path: impl AsRef<Path>) -> Result<CString, Error> {
     Ok(CString::new(path.as_ref().as_os_str().as_encoded_bytes())?)
 }
 
@@ -104,20 +108,6 @@ pub enum Error {
 
     #[error("utf-8 error")]
     Utf8Error(#[from] std::str::Utf8Error),
-}
-
-struct SendWrapper<T>(T);
-
-unsafe impl<T> Send for SendWrapper<T> {}
-
-impl<T> SendWrapper<T> {
-    pub fn new(x: T) -> Self {
-        Self(x)
-    }
-
-    pub unsafe fn unwrap(self) -> T {
-        self.0
-    }
 }
 
 #[allow(non_camel_case_types)]

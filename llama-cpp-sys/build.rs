@@ -40,12 +40,12 @@ fn compile_llama_cpp(llama_cpp: &Path) -> PathBuf {
         // i think we need this, since we're statically linking.
         // this will also enable avx, avx2, fma. we might not want this
         .define("LLAMA_NATIVE", "OFF");
+    //.define("LLAMA_AVX", "ON")
+    //.define("LLAMA_AVX2", "ON");
     config.build().join("lib")
 }
 
 fn main() {
-    // TODO: build gpt4all using cmake
-
     let llama_cpp = Path::new("llama.cpp").canonicalize().unwrap();
 
     // fetch git submodule
@@ -53,8 +53,6 @@ fn main() {
 
     // compile llama.cpp
     let compiled = compile_llama_cpp(&llama_cpp);
-
-    //copy_library_files(&libdir_path);
 
     // statically link to llama.cpp
     println!("cargo:rustc-link-search=native={}", compiled.display());

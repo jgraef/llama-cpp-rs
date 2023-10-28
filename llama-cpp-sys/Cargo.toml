@@ -13,5 +13,5 @@ cmake = "0.1"
 
 [features]
 default = []
-avx = []
-avx2 = []
+#avx = []
+#avx2 = []

@@ -1,11 +1,18 @@
+use derivative::Derivative;
+
 use super::{
     context::Context,
     Token,
 };
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct Grammar {
+    #[derivative(Debug = "ignore")]
     pub(super) handle: *mut llama_cpp_sys::llama_grammar,
 }
+
+unsafe impl Send for Grammar {}
 
 impl Grammar {
     pub fn accept_token(&mut self, context: &mut Context, token: Token) {

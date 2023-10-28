@@ -113,7 +113,7 @@ unsafe impl Send for Context {}
 impl Context {
     pub(super) fn new(model: Model, parameters: &ContextParameters) -> Self {
         let parameters = parameters.to_ffi();
-        tracing::debug!("creating context: {:#?}", parameters);
+        tracing::trace!("creating context: {:#?}", parameters);
 
         let handle =
             unsafe { llama_cpp_sys::llama_new_context_with_model(model.inner.handle, parameters) };
@@ -167,7 +167,7 @@ impl Context {
     }
 
     pub(super) fn decode(&mut self, batch: &Batch) -> Result<Option<DecodeWarning>, Error> {
-        tracing::debug!("calling llama_decode");
+        tracing::trace!("calling llama_decode");
 
         assert!(batch.data.n_tokens > 0);
 
@@ -194,7 +194,7 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        tracing::debug!("calling llama_free (context)");
+        tracing::trace!("calling llama_free (context)");
         unsafe { llama_cpp_sys::llama_free(self.handle) }
     }
 }

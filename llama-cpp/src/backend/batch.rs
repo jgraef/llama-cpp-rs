@@ -16,7 +16,7 @@ unsafe impl Send for Batch {}
 
 impl Batch {
     pub(super) fn new(n_tokens: usize, n_seq_max: usize) -> Self {
-        tracing::debug!(n_tokens, n_seq_max, "calling llama_batch_init");
+        tracing::trace!(n_tokens, n_seq_max, "calling llama_batch_init");
 
         let data = unsafe {
             // for `embd` we need to pass 0, otherwise data.tokens is not allocated and thus
@@ -40,7 +40,7 @@ impl Batch {
     }
 
     pub(super) fn clear(&mut self) {
-        tracing::debug!("batch_clear");
+        tracing::trace!("batch_clear");
         self.data.n_tokens = 0;
     }
 
@@ -66,7 +66,7 @@ impl Batch {
         ```
         */
 
-        tracing::debug!(id, pos, logits, seq_ids = ?seq_ids, "batch_add");
+        tracing::trace!(id, pos, logits, seq_ids = ?seq_ids, "batch_add");
         assert!(seq_ids.len() <= self.n_seq_max);
 
         let n_tokens = self.data.n_tokens as usize;
@@ -118,7 +118,7 @@ impl Batch {
 impl Drop for Batch {
     fn drop(&mut self) {
         unsafe {
-            tracing::debug!("calling llama_batch_free");
+            tracing::trace!("calling llama_batch_free");
             llama_cpp_sys::llama_batch_free(self.data);
         }
     }

@@ -2,6 +2,7 @@ use std::path::Path;
 
 use super::{
     ffi_path,
+    llama_init,
     Error,
     FType,
     DEFAULT_N_THREADS,
@@ -57,6 +58,9 @@ pub async fn quantize(
     output: impl AsRef<Path>,
     parameters: &QuantizationParameters,
 ) -> Result<(), Error> {
+    // is this necessary?
+    llama_init();
+
     let input = ffi_path(input)?;
     let output = ffi_path(output)?;
     let params = parameters.to_ffi();

@@ -8,23 +8,18 @@ use std::{
     sync::Arc,
 };
 
-use tokio::{
-    sync::watch,
-    task::JoinHandle,
-};
-
 use super::{
     context::{
         Context,
         ContextParameters,
     },
+    ffi_path,
     llama_init,
     Error,
     Token,
     VocabType,
     MAX_DEVICES,
 };
-use crate::backend::ffi_path;
 
 #[derive(Clone, Debug)]
 pub struct ModelParameters {
@@ -84,7 +79,7 @@ pub(super) struct ModelInner {
 impl Drop for ModelInner {
     fn drop(&mut self) {
         unsafe {
-            tracing::debug!("calling llama_free_model");
+            tracing::trace!("calling llama_free_model");
             llama_cpp_sys::llama_free_model(self.handle);
         }
     }
@@ -101,21 +96,45 @@ pub struct Model {
 }
 
 impl Model {
-    /// todo: make this take a progress callback closure and block until the
-    /// model is loaded.
-    pub fn load(path: impl AsRef<Path>, parameters: ModelParameters) -> ModelLoader {
+    pub fn load<P: FnMut(f32)>(
+        path: impl AsRef<Path>,
+        parameters: &ModelParameters,
+        mut progress: P,
+    ) -> Result<Self, Error> {
         llama_init();
-
-        let (mut tx, rx) = watch::channel(0.0);
 
         let path = path.as_ref().to_owned();
 
-        let join_handle =
-            tokio::task::spawn_blocking(move || load_model(path, parameters, &mut tx));
+        tracing::debug!("loading model: {}", path.display());
 
-        ModelLoader {
-            progress: rx,
-            join_handle,
+        // we pass a pointer to the Box rather than the boxes pointer itself, so that we
+        // definitely clean up its memory when it's dropped.
+        let progress_callback_user_data = &mut progress as *mut _ as *mut c_void;
+        let c_path = ffi_path(&path)?;
+
+        unsafe extern "C" fn progress_callback<P: FnMut(f32)>(
+            progress: f32,
+            user_data: *mut c_void,
+        ) {
+            let f = &mut *(user_data as *mut P);
+            f(progress);
+        }
+
+        let handle = unsafe {
+            let parameters =
+                parameters.to_ffi(Some(progress_callback::<P>), progress_callback_user_data);
+            llama_cpp_sys::llama_load_model_from_file(c_path.as_ptr(), parameters)
+        };
+
+        if handle.is_null() {
+            tracing::debug!("llama_load_model_from file returned NULL");
+            Err(Error::ModelLoadFailed { path })
+        }
+        else {
+            tracing::debug!("model loaded");
+            Ok(Model {
+                inner: Arc::new(ModelInner { handle, path }),
+            })
         }
     }
 
@@ -169,7 +188,7 @@ impl Model {
     }
 
     pub fn tokenize(&self, text: &str, add_bos: bool, allow_special: bool) -> Vec<Token> {
-        tracing::debug!(text, "tokenize");
+        tracing::trace!(text, "tokenize");
 
         // this is exactly how llama.cpp/common.cpp does it
         let token_count = text.len() + if add_bos { 1 } else { 0 };
@@ -177,12 +196,12 @@ impl Model {
         let text_len = text.len() as i32;
         let text = text.as_ptr() as _;
 
-        tracing::debug!(token_count, text_len);
+        tracing::trace!(token_count, text_len);
 
         let mut token_buf = Vec::with_capacity(token_count);
         token_buf.resize(token_count, 0);
 
-        tracing::debug!("calling llama_tokenize");
+        tracing::trace!("calling llama_tokenize");
         let ret = unsafe {
             llama_cpp_sys::llama_tokenize(
                 self.inner.handle,
@@ -194,7 +213,7 @@ impl Model {
                 allow_special,
             )
         };
-        tracing::debug!(ret);
+        tracing::trace!(ret);
 
         // todo: are there cases where you could have more tokens that input characters?
         if ret < 0 {
@@ -207,7 +226,7 @@ impl Model {
         token_buf
     }
 
-    pub fn token_to_piece(&self, token: Token, output: &mut String) -> Result<(), Error> {
+    pub fn token_to_piece(&self, token: Token, output: &mut Vec<u8>) {
         const BUF_SIZE: usize = 32;
         let mut buf = [0u8; BUF_SIZE];
 
@@ -220,86 +239,58 @@ impl Model {
             )
         } as usize;
 
+        tracing::trace!(piece = ?buf, num_chars);
+
         assert!(num_chars <= BUF_SIZE);
-        output.push_str(std::str::from_utf8(&buf[..num_chars])?);
+        output.extend_from_slice(&buf[..num_chars]);
+    }
 
-        Ok(())
+    pub fn token_decoder(&self) -> TokenDecoder {
+        TokenDecoder::new(self.clone())
     }
 }
 
-unsafe extern "C" fn progress_callback(progress: f32, user_data: *mut c_void) {
-    let tx = &mut *(user_data as *mut watch::Sender<f32>);
-
-    // and error is returned when all the receivers have been dropped. but then we
-    // don't care.
-    tx.send(progress).ok();
+pub struct TokenDecoder {
+    model: Model,
+    buf: Vec<u8>,
+    pub strip_leading_space: bool,
 }
 
-fn load_model(
-    path: PathBuf,
-    parameters: ModelParameters,
-    tx: &mut watch::Sender<f32>,
-) -> Result<Model, Error> {
-    // note: `tx` lives at least as long as this closure, so it won't be dropped
-    // until `llama_load_model_from_file` returns. then the callback won't be called
-    // with the pointer to `tx` anymore.
-
-    tracing::debug!("loading model: {}", path.display());
-
-    let progress_callback_user_data = tx as *mut _ as *mut c_void;
-    let c_path = ffi_path(&path)?;
-
-    let handle = unsafe {
-        let parameters = parameters.to_ffi(Some(progress_callback), progress_callback_user_data);
-        llama_cpp_sys::llama_load_model_from_file(c_path.as_ptr(), parameters)
-    };
-
-    if handle.is_null() {
-        tracing::debug!("llama_load_model_from file returned NULL");
-        Err(Error::ModelLoadFailed { path })
-    }
-    else {
-        tracing::debug!("model loaded");
-        Ok(Model {
-            inner: Arc::new(ModelInner { handle, path }),
-        })
-    }
-}
-
-pub struct ModelLoader {
-    progress: watch::Receiver<f32>,
-    join_handle: JoinHandle<Result<Model, Error>>,
-}
-
-impl ModelLoader {
-    pub fn progress(&self) -> f32 {
-        *self.progress.borrow()
-    }
-
-    pub async fn wait_for_model(self) -> Result<Model, Error> {
-        self.join_handle
-            .await
-            .expect("model loading thread panicked")
-    }
-
-    pub async fn wait_for_progress(&mut self) -> Option<f32> {
-        match self.progress.changed().await {
-            Ok(()) => Some(*self.progress.borrow_and_update()),
-            // the watch channel returns an error iff the sender has been dropped, i.e. the model
-            // loading thread finished.
-            Err(_) => None,
+impl TokenDecoder {
+    pub fn new(model: Model) -> Self {
+        Self {
+            model,
+            buf: Vec::with_capacity(32),
+            strip_leading_space: false,
         }
     }
 
-    pub async fn wait_with_progress(mut self, mut f: impl FnMut(f32)) -> Result<Model, Error> {
-        loop {
-            let Some(progress) = self.wait_for_progress().await
-            else {
-                break;
-            };
-            f(progress);
-        }
+    pub fn push_token(&mut self, token: Token) {
+        self.model.token_to_piece(token, &mut self.buf);
+    }
 
-        self.wait_for_model().await
+    pub fn get_str(&self) -> Option<&str> {
+        std::str::from_utf8(&self.buf).ok()
+    }
+
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
+
+    pub fn decode(&mut self, token: Token) -> Option<String> {
+        self.push_token(token);
+        let s = self.get_str()?;
+
+        let s = if self.strip_leading_space {
+            let s = s.trim_start_matches(' ').to_owned();
+            self.strip_leading_space = false;
+            s
+        }
+        else {
+            s.to_owned()
+        };
+
+        self.clear();
+        Some(s)
     }
 }

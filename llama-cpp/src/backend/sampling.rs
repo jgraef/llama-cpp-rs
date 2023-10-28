@@ -1,7 +1,4 @@
-use std::{
-    borrow::Cow,
-    pin::Pin,
-};
+use std::pin::Pin;
 
 use super::{
     context::Context,
@@ -9,7 +6,7 @@ use super::{
     Token,
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SamplingParameters {
     pub mode: SamplingMode,
     pub repetition_penalties: Option<RepetitionPenalties>,
@@ -65,22 +62,19 @@ pub struct TopP {
     pub min_keep: usize,
 }
 
-pub struct Sampler<'a> {
-    parameters: &'a SamplingParameters,
+#[derive(Clone, Debug)]
+pub struct Sampler {
+    parameters: SamplingParameters,
 
     /// mu for mirostat sampling
     mu: f32,
-
-    /// grammar for grammar sampling
-    grammar: Option<Cow<'a, Grammar>>,
 }
 
-impl<'a> Sampler<'a> {
-    pub fn new(parameters: &'a SamplingParameters) -> Self {
+impl Sampler {
+    pub fn new(parameters: SamplingParameters) -> Self {
         Self {
             parameters,
             mu: 0.0,
-            grammar: parameters.grammar.as_ref().map(|g| Cow::Borrowed(g)),
         }
     }
 
@@ -124,7 +118,7 @@ impl<'a> Sampler<'a> {
                 self.parameters.temperature,
             );
         }
-        if let Some(grammar) = &self.grammar {
+        if let Some(grammar) = &self.parameters.grammar {
             unsafe {
                 llama_cpp_sys::llama_sample_grammar(context.handle, candidates, grammar.handle);
             }
@@ -160,11 +154,17 @@ impl<'a> Sampler<'a> {
         };
 
         // feed token into grammar
-        if let Some(grammar) = &mut self.grammar {
-            grammar.to_mut().accept_token(context, token);
+        if let Some(grammar) = &mut self.parameters.grammar {
+            grammar.accept_token(context, token);
         }
 
         token
+    }
+}
+
+impl From<SamplingParameters> for Sampler {
+    fn from(parameters: SamplingParameters) -> Self {
+        Self::new(parameters)
     }
 }
 

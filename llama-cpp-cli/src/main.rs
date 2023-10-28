@@ -1,70 +1,139 @@
-use std::path::PathBuf;
+use std::{
+    io::{
+        stdout,
+        Write,
+    },
+    path::PathBuf,
+};
 
 use color_eyre::eyre::Error;
-use llama_cpp::backend::{
-    context::ContextParameters,
-    inference::Inference,
-    model::Model,
-    sampling::Sampler,
-    system_info,
+use futures::{
+    pin_mut,
+    StreamExt,
+};
+use llama_cpp::{
+    backend::{
+        context::ContextParameters,
+        sampling::{
+            SamplingMode,
+            SamplingParameters,
+            TopK,
+            TopP,
+        },
+        system_info,
+    },
+    loader::ModelLoader,
+    session::{
+        Session,
+        SessionParameters,
+    },
 };
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
-struct Args {
-    #[structopt(subcommand)]
-    command: Command,
+enum Args {
+    Generate {
+        #[structopt(short, long)]
+        model_path: PathBuf,
+
+        #[structopt(short, long)]
+        seed: Option<u32>,
+
+        prompt: String,
+    },
+    SystemInfo,
+    PrintVocab {
+        #[structopt(short, long)]
+        model_path: PathBuf,
+    },
 }
 
 impl Args {
     pub async fn run(self) -> Result<(), Error> {
-        match self.command {
-            Command::Complete { model_path, prompt } => {
-                let model = Model::load(&model_path, Default::default())
+        match self {
+            Self::Generate {
+                model_path,
+                seed,
+                prompt,
+            } => {
+                let session_parameters = SessionParameters {
+                    context: ContextParameters {
+                        seed,
+                        n_ctx: Some(512),
+                        n_batch: 512,
+                        ..Default::default()
+                    },
+                    batch_size: Some(64),
+                };
+
+                let sampling_parameters = SamplingParameters {
+                    mode: SamplingMode::Propability,
+                    repetition_penalties: None,
+                    soft_max: false,
+                    top_k: Some(TopK { k: 40, min_keep: 1 }),
+                    top_p: Some(TopP {
+                        p: 0.9,
+                        min_keep: 1,
+                    }),
+                    temperature: 0.4,
+                    grammar: None,
+                };
+
+                let model = ModelLoader::load(&model_path, Default::default())
                     .wait_for_model()
                     .await?;
 
-                let prompt = model.tokenize(&prompt, true, false);
-                tracing::debug!("prompt tokens: {:?}", prompt);
+                print!("{}", prompt);
+                stdout().flush()?;
 
-                let n_len = 32;
+                let mut session = Session::new(model, session_parameters);
 
-                let mut context_params = ContextParameters::default();
-                context_params.n_ctx = Some(n_len);
-                context_params.n_batch = n_len;
-                let mut context = model.context(&context_params);
+                session.push_text(&prompt, true, false);
 
-                let mut inference = Inference::new(&mut context, prompt.len());
-                inference.push(&prompt)?;
+                let mut sampler = session.sampler(sampling_parameters);
 
-                let sampler_params = Default::default();
-                let mut sampler = Sampler::new(&sampler_params);
+                let stream = sampler.pieces(None, [], false);
+                pin_mut!(stream);
 
-                while let Some(token) = inference.sample(&mut sampler)? {
-                    let mut response = String::new();
-                    model.token_to_piece(token, &mut response)?;
-                    tracing::info!(token_id = token, token = response);
+                while let Some(piece) = stream.next().await {
+                    print!("{piece}");
+                    stdout().flush()?;
                 }
+
+                println!("");
             }
-            Command::SystemInfo => {
+            Self::SystemInfo => {
                 let info = system_info();
                 println!("{}", info);
+            }
+            Self::PrintVocab { model_path } => {
+                let model = ModelLoader::load(&model_path, Default::default())
+                    .wait_for_model()
+                    .await?;
+
+                let n_vocab = model.n_vocab();
+                let mut buf = Vec::with_capacity(32);
+
+                for i in 0..n_vocab {
+                    model.token_to_piece(i as _, &mut buf);
+
+                    if let Ok(s) = std::str::from_utf8(&buf) {
+                        println!("{i} = '{s}'");
+                    }
+                    else if buf.len() == 1 {
+                        println!("{i} = 0x{:02x}", buf[0]);
+                    }
+                    else {
+                        println!("{i} = {:?}", buf);
+                    }
+
+                    buf.clear();
+                }
             }
         }
 
         Ok(())
     }
-}
-
-#[derive(Debug, StructOpt)]
-enum Command {
-    Complete {
-        #[structopt(short, long)]
-        model_path: PathBuf,
-
-        prompt: String,
-    },
-    SystemInfo,
 }
 
 #[tokio::main]

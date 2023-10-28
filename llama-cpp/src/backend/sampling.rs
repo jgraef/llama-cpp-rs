@@ -20,12 +20,15 @@ pub struct SamplingParameters {
 impl Default for SamplingParameters {
     fn default() -> Self {
         Self {
-            mode: SamplingMode::Greedy,
+            mode: SamplingMode::Propability,
             repetition_penalties: None,
             soft_max: false,
-            top_k: None,
-            top_p: None,
-            temperature: 0.0,
+            top_k: Some(TopK { k: 40, min_keep: 1 }),
+            top_p: Some(TopP {
+                p: 0.9,
+                min_keep: 1,
+            }),
+            temperature: 0.4,
             grammar: None,
         }
     }

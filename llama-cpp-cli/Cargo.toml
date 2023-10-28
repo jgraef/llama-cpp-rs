@@ -3,6 +3,15 @@ name = "llama-cpp-cli"
 version = "0.1.0"
 edition = "2021"
 authors = ["Janosch Gräf <janosch.graef@gmail.com>"]
+description = "llama.cpp command line interface written in Rust"
+repository = "https://github.com/jgraef/llama-cpp-rs"
+homepage = "https://github.com/jgraef/llama-cpp-rs"
+# todo: add this once it's on docs.rs
+# documentation = ""
+keywords = ["llm", "ai"]
+categories = ["command-line-utilities", "science", "text-processing"]
+readme = "../README.md"
+license = "MIT"
 
 [dependencies]
 tracing = "0.1"

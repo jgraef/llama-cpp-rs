@@ -10,7 +10,7 @@ use crate::{
         Model,
         ModelParameters,
     },
-    error::Error,
+    Error,
 };
 
 pub struct ModelLoader {

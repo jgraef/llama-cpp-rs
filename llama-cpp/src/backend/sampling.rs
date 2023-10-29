@@ -2,9 +2,11 @@ use std::pin::Pin;
 
 use super::{
     context::Context,
-    grammar::Grammar,
+    grammar::Grammar as LoadedGrammar,
+    Error,
     Token,
 };
+use crate::grammar::compiler::Compiled as CompiledGrammar;
 
 #[derive(Clone, Debug)]
 pub struct SamplingParameters {
@@ -13,8 +15,9 @@ pub struct SamplingParameters {
     pub soft_max: bool,
     pub top_k: Option<TopK>,
     pub top_p: Option<TopP>,
+    // todo: move temperature into [`SamplingMode`], since it's not needed for greedy sampling
     pub temperature: f32,
-    pub grammar: Option<Grammar>,
+    pub grammar: Option<CompiledGrammar>,
 }
 
 impl Default for SamplingParameters {
@@ -39,6 +42,7 @@ pub enum SamplingMode {
     MiroStat { tau: f32, eta: f32, m: i32 },
     MiroStatV2 { tau: f32, eta: f32 },
     Greedy,
+    // todo: llama.cpp calls this 'temperature sampling'.
     Propability,
 }
 
@@ -71,14 +75,21 @@ pub struct Sampler {
 
     /// mu for mirostat sampling
     mu: f32,
+
+    grammar: Option<LoadedGrammar>,
 }
 
 impl Sampler {
-    pub fn new(parameters: SamplingParameters) -> Self {
-        Self {
+    pub fn new(parameters: SamplingParameters) -> Result<Self, Error> {
+        let grammar = parameters
+            .grammar
+            .as_ref()
+            .map(|grammar| LoadedGrammar::load(grammar));
+        Ok(Self {
             parameters,
             mu: 0.0,
-        }
+            grammar,
+        })
     }
 
     // check if we need Context as mut-borrow.
@@ -89,11 +100,21 @@ impl Sampler {
         if let Some(_repetition_penalties) = &self.parameters.repetition_penalties {
             todo!("implement repetition penalties");
         }
+
+        // note: grammar sampling doesn't work if this is done in another order! if
+        // something breaks, check the llama.cpp sampling code.
+        if let Some(grammar) = &self.grammar {
+            unsafe {
+                llama_cpp_sys::llama_sample_grammar(context.handle, candidates, grammar.handle);
+            }
+        }
+
         if self.parameters.soft_max {
             unsafe {
                 llama_cpp_sys::llama_sample_softmax(context.handle, candidates);
             }
         }
+
         if let Some(top_k) = &self.parameters.top_k {
             unsafe {
                 llama_cpp_sys::llama_sample_top_k(
@@ -104,6 +125,7 @@ impl Sampler {
                 );
             }
         }
+
         if let Some(top_p) = &self.parameters.top_p {
             unsafe {
                 llama_cpp_sys::llama_sample_top_p(
@@ -114,17 +136,13 @@ impl Sampler {
                 );
             }
         }
+
         unsafe {
             llama_cpp_sys::llama_sample_temp(
                 context.handle,
                 candidates,
                 self.parameters.temperature,
             );
-        }
-        if let Some(grammar) = &self.parameters.grammar {
-            unsafe {
-                llama_cpp_sys::llama_sample_grammar(context.handle, candidates, grammar.handle);
-            }
         }
 
         // sample next token
@@ -157,16 +175,21 @@ impl Sampler {
         };
 
         // feed token into grammar
-        if let Some(grammar) = &mut self.parameters.grammar {
-            grammar.accept_token(context, token);
+        if let Some(grammar) = &mut self.grammar {
+            // see safety section in [`Grammar::accept_token`].
+            unsafe {
+                grammar.accept_token(context, token);
+            }
         }
 
         token
     }
 }
 
-impl From<SamplingParameters> for Sampler {
-    fn from(parameters: SamplingParameters) -> Self {
+impl TryFrom<SamplingParameters> for Sampler {
+    type Error = Error;
+
+    fn try_from(parameters: SamplingParameters) -> Result<Self, Error> {
         Self::new(parameters)
     }
 }

@@ -34,10 +34,13 @@ use structopt::StructOpt;
 enum Args {
     Generate {
         #[structopt(short, long)]
-        model_path: PathBuf,
+        model: PathBuf,
 
         #[structopt(short, long)]
         seed: Option<u32>,
+
+        #[structopt(short, long)]
+        grammar: Option<PathBuf>,
 
         prompt: String,
     },
@@ -52,8 +55,9 @@ impl Args {
     pub async fn run(self) -> Result<(), Error> {
         match self {
             Self::Generate {
-                model_path,
+                model,
                 seed,
+                grammar,
                 prompt,
             } => {
                 let session_parameters = SessionParameters {
@@ -66,6 +70,10 @@ impl Args {
                     batch_size: Some(64),
                 };
 
+                let grammar = grammar
+                    .map(|path| llama_cpp::grammar::compile_from_source(path))
+                    .transpose()?;
+
                 let sampling_parameters = SamplingParameters {
                     mode: SamplingMode::Propability,
                     repetition_penalties: None,
@@ -76,10 +84,10 @@ impl Args {
                         min_keep: 1,
                     }),
                     temperature: 0.4,
-                    grammar: None,
+                    grammar,
                 };
 
-                let model = ModelLoader::load(&model_path, Default::default())
+                let model = ModelLoader::load(&model, Default::default())
                     .wait_for_model()
                     .await?;
 
@@ -90,7 +98,7 @@ impl Args {
 
                 session.push_text(&prompt, true, false);
 
-                let mut sampler = session.sampler(sampling_parameters);
+                let mut sampler = session.sampler(sampling_parameters)?;
 
                 let stream = sampler.pieces(None, [], false);
                 pin_mut!(stream);

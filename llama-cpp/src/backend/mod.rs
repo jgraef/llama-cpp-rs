@@ -108,6 +108,9 @@ pub enum Error {
 
     #[error("utf-8 error")]
     Utf8Error(#[from] std::str::Utf8Error),
+
+    #[error("failed to load grammar")]
+    GrammarLoadFailed,
 }
 
 #[allow(non_camel_case_types)]

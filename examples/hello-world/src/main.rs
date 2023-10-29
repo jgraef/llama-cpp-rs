@@ -1,10 +1,21 @@
-use std::{path::Path, io::{stdout, Write}};
+use std::{
+    io::{
+        stdout,
+        Write,
+    },
+    path::Path,
+};
 
 use color_eyre::eyre::Error;
-
-use futures::{pin_mut, StreamExt};
-use llama_cpp::{loader::ModelLoader, session::Session, backend::sampling::SamplingParameters};
-
+use futures::{
+    pin_mut,
+    StreamExt,
+};
+use llama_cpp::{
+    backend::sampling::SamplingParameters,
+    loader::ModelLoader,
+    session::Session,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -36,7 +47,7 @@ async fn main() -> Result<(), Error> {
     session.push_text(&prompt, true, false);
 
     // create a sampler and a response stream from it
-    let mut sampler = session.sampler(SamplingParameters::default());
+    let mut sampler = session.sampler(SamplingParameters::default())?;
     let stream = sampler.pieces(None, [], false);
     pin_mut!(stream);
 

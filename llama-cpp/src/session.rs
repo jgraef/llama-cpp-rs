@@ -44,10 +44,13 @@ use crate::{
             Model,
             TokenDecoder,
         },
-        sampling::Sampler as SyncSampler,
+        sampling::{
+            Sampler as SyncSampler,
+            SamplingParameters,
+        },
         Token,
     },
-    error::Error,
+    Error,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -89,11 +92,14 @@ impl Session {
         self.push_tokens(tokens);
     }
 
-    pub fn sampler<'a>(&'a mut self, sampler: impl Into<SyncSampler>) -> Sampler<'a> {
+    pub fn sampler<'a>(
+        &'a mut self,
+        sampling_parameters: SamplingParameters,
+    ) -> Result<Sampler<'a>, Error> {
         self.send_command(Command::SetSampler {
-            sampler: sampler.into(),
+            sampler: SyncSampler::new(sampling_parameters)?,
         });
-        Sampler { session: self }
+        Ok(Sampler { session: self })
     }
 }
 

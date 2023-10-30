@@ -1,6 +1,13 @@
-pub mod batch;
+//! Low-level bindings for llama.cpp
+//!
+//! This module provides low-level wrappers around the FFI interface. Everything
+//! here is synchronous, meaning it can't be awaited and will block the current
+//! thread. Since LLM inference is a slow process, it's recommended to use the
+//! high-level interface, which runs the synchronous code in a separate thread.
+
+mod batch;
 pub mod context;
-pub mod grammar;
+pub(crate) mod grammar;
 pub mod inference;
 pub mod model;
 pub mod quantization;
@@ -26,10 +33,19 @@ use std::{
 
 use lazy_static::lazy_static;
 
+/// Max number of devices that can be used to split a tensor computations in
+/// between.
+///
+/// This is defined by the llama.cpp library.
 pub const MAX_DEVICES: usize = llama_cpp_sys::llama_define_max_devices;
+
+/// Default seed for RNG.
+///
+/// This is defined by the llama.cpp library.
 pub const DEFAULT_SEED: u32 = llama_cpp_sys::llama_define_default_seed;
 
 lazy_static! {
+    /// Default number of threads. This is lazily initialized to be the number of physical cores, as reported by the [num_cpus](https://docs.rs/num_cpus/latest/num_cpus/) crate.
     pub static ref DEFAULT_N_THREADS: u32 = num_cpus::get_physical() as u32;
 }
 
@@ -72,6 +88,10 @@ pub(self) fn llama_init() {
 
 static SYSTEM_INFO_MUTEX: Mutex<()> = Mutex::new(());
 
+/// Returns llama.cpp's system info (`llama_print_system_info()`).
+///
+/// This contains the various features enabled in the llama.cpp library and is
+/// useful for diagnostics.
 pub fn system_info() -> String {
     // the system info function writes to a static buffer, so we need to lock.
     let _guard = SYSTEM_INFO_MUTEX
@@ -89,30 +109,39 @@ pub(self) fn ffi_path(path: impl AsRef<Path>) -> Result<CString, Error> {
     Ok(CString::new(path.as_ref().as_os_str().as_encoded_bytes())?)
 }
 
+/// Backend error
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Tried to pass a string containing null bytes to FFI interface.
     #[error("string contains null byte")]
     NulError(#[from] std::ffi::NulError),
 
+    /// Could not load the model.
     #[error("failed to load model: {path}")]
     ModelLoadFailed { path: PathBuf },
 
+    /// Could not quantize the model.
     #[error("quantization failed")]
     QuantizationFailed,
 
+    /// The context expects the state data to be a specific size.
     #[error("expected state data with {expected} bytes, but got {got} bytes")]
     InvalidStateDataLength { expected: usize, got: usize },
 
+    /// Decoder error
     #[error("model decode failed")]
     DecodeError,
 
+    /// Incorrect UTF-8 encoding of `&str`
     #[error("utf-8 error")]
-    Utf8Error(#[from] std::str::Utf8Error),
+    StrUtf8Error(#[from] std::str::Utf8Error),
 
-    #[error("failed to load grammar")]
-    GrammarLoadFailed,
+    /// Incorrect UTF-8 encoding of `String`
+    #[error("utf-8 error")]
+    StringUtf8Error(#[from] std::string::FromUtf8Error),
 }
 
+/// The number type used by a model.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
 pub enum FType {
@@ -162,6 +191,7 @@ impl FType {
         }
     }
 
+    #[allow(dead_code)]
     fn from_ffi(x: llama_cpp_sys::llama_ftype) -> Self {
         match x {
             llama_cpp_sys::llama_ftype::LLAMA_FTYPE_ALL_F32 => FType::AllF32,
@@ -188,6 +218,7 @@ impl FType {
     }
 }
 
+/// The vocabulary type used by a model.
 pub enum VocabType {
     Spm,
     Bpe,
@@ -202,8 +233,13 @@ impl VocabType {
     }
 }
 
+/// A token.
+///
+/// This is defined by llama.cpp to be just an `i32`.
+///
+/// You can use [`model::Model::tokenize`] to turn a string into tokens and
+/// [`model::Model::token_to_piece`] turn a token into its corresponding text.
 pub type Token = llama_cpp_sys::llama_token;
 
-pub type Pos = llama_cpp_sys::llama_pos;
-
-pub type SeqId = llama_cpp_sys::llama_seq_id;
+type Pos = llama_cpp_sys::llama_pos;
+type SeqId = llama_cpp_sys::llama_seq_id;

@@ -1,0 +1,18 @@
+[package]
+name = "emoji-grammar"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dotenvy = "0.15"
+color-eyre = "0.6"
+tokio = { version = "1.33", features = ["rt-multi-thread", "macros"] }
+futures = "0.3"
+emoji = "0.2"
+
+[dependencies.llama-cpp]
+version = "0.1.0"
+path = "../../llama-cpp"

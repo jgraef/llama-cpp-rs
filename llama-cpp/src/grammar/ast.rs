@@ -1,3 +1,5 @@
+//! Abstract syntax tree for GBNF grammar.
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grammar<'source>(pub Vec<Production<'source>>);
 
@@ -43,7 +45,7 @@ pub enum Qualifier {
 pub enum Term<'source> {
     Literal(Literal),
     CharClass(CharClass),
-    Parenthesis(Box<Alternatives<'source>>),
+    Parenthesis(Alternatives<'source>),
     Rule(Id<'source>),
 }
 

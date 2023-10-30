@@ -1,3 +1,5 @@
+//! Compile from AST to binary format.
+
 use std::collections::HashMap;
 
 use super::{
@@ -15,12 +17,14 @@ use super::{
     Error,
 };
 use crate::{
-    backend::grammar::Grammar as BackendGrammar,
     grammar::ast::CharRange,
     utils::IsLast,
 };
 
+/// Alias for llama.cpp's grammar element.
 pub type Element = llama_cpp_sys::llama_grammar_element;
+
+/// Alias for llama.cpp's grammar element type.
 pub type ElementType = llama_cpp_sys::llama_gretype;
 
 enum Rule<'source> {
@@ -38,47 +42,93 @@ impl<'source> Rule<'source> {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CheckError {
+    #[error("no rules")]
+    NoRules,
+
+    #[error("no root: index={index}")]
+    InvalidRoot { index: usize },
+
+    #[error("empty rule: rule={rule}")]
+    EmptyRule { rule: usize },
+
+    #[error("no end in rule: rule={rule}, pos={pos}")]
+    NoEnd { rule: usize, pos: usize },
+
+    #[error("end in middle of rule: rule={rule}, pos={pos}")]
+    EndInMiddle { rule: usize, pos: usize },
+
+    #[error("invalid rule ref: rule={rule}, pos={pos}, ref={rule_ref}")]
+    InvalidRef {
+        rule: usize,
+        pos: usize,
+        rule_ref: u32,
+    },
+
+    #[error("invalid code point: rule={rule}, pos={pos}, code_point={code_point}")]
+    InvalidChar {
+        rule: usize,
+        pos: usize,
+        code_point: u32,
+    },
+}
+
+/// A compiled grammar. This is the binary format that llama.cpp uses.
 #[derive(Clone, Debug)]
 pub struct Compiled {
+    /// Index of the root rule.
     pub root: usize,
+
+    /// The grammar rules. Each rule is a `Vec` of [`Element`]s.
     pub rules: Vec<Vec<Element>>,
 }
 
 impl Compiled {
-    pub fn load(&self) -> BackendGrammar {
-        // the BackendGrammar::load calls check on this.
-        BackendGrammar::load(self)
-    }
-
-    pub fn check(&self) -> Result<(), Error> {
+    /// Checks if the compiled grammar is valid.
+    pub fn check(&self) -> Result<(), CheckError> {
         // todo: i think we really need to make sure the grammar is correct, otherwise
         // loading and running it, could lead to UB.
         let n_rules = self.rules.len();
 
         if n_rules == 0 {
-            return Err(Error::InvalidCompiled("no rules"));
+            return Err(CheckError::NoRules);
         }
 
         if self.root >= n_rules {
-            return Err(Error::InvalidCompiled("no root"));
+            return Err(CheckError::InvalidRoot { index: self.root });
         }
 
-        for rule in &self.rules {
+        for (i, rule) in self.rules.iter().enumerate() {
             if rule.is_empty() {
-                return Err(Error::InvalidCompiled("empty rule"));
+                return Err(CheckError::EmptyRule { rule: i });
             }
 
-            for (element, is_last) in IsLast::new(rule.iter()) {
+            for ((pos, element), is_last) in IsLast::new(rule.iter().enumerate()) {
                 if is_last && !matches!(element.type_, ElementType::LLAMA_GRETYPE_END) {
-                    return Err(Error::InvalidCompiled("no end"));
+                    return Err(CheckError::NoEnd { rule: i, pos });
                 }
                 match element.type_ {
                     ElementType::LLAMA_GRETYPE_END if !is_last => {
-                        return Err(Error::InvalidCompiled("end in the middle of a rule"));
+                        return Err(CheckError::EndInMiddle { rule: i, pos });
                     }
-                    ElementType::LLAMA_GRETYPE_RULE_REF => {
-                        if element.value as usize >= n_rules {
-                            return Err(Error::InvalidCompiled("ref index out of bounds"));
+                    ElementType::LLAMA_GRETYPE_RULE_REF if element.value as usize >= n_rules => {
+                        return Err(CheckError::InvalidRef {
+                            rule: i,
+                            pos,
+                            rule_ref: element.value,
+                        });
+                    }
+                    ElementType::LLAMA_GRETYPE_CHAR
+                    | ElementType::LLAMA_GRETYPE_CHAR_NOT
+                    | ElementType::LLAMA_GRETYPE_CHAR_RNG_UPPER
+                    | ElementType::LLAMA_GRETYPE_CHAR_ALT => {
+                        if let Err(_e) = char::try_from(element.value) {
+                            return Err(CheckError::InvalidChar {
+                                rule: i,
+                                pos,
+                                code_point: element.value,
+                            });
                         }
                     }
                     _ => {}
@@ -98,7 +148,7 @@ pub(super) struct Compiler<'source> {
 
 impl<'source> Compiler<'source> {
     pub fn finish(self, root: Id<'source>) -> Result<Compiled, Error> {
-        let root = self.get_rule_index(root)?;
+        let root = self.get_rule_index(root).map_err(|_| Error::NoRoot)?;
 
         let rules = self
             .rules
@@ -106,7 +156,13 @@ impl<'source> Compiler<'source> {
             .map(|rule| rule.get_ready())
             .collect();
 
-        Ok(Compiled { root, rules })
+        let compiled = Compiled { root, rules };
+
+        compiled
+            .check()
+            .expect("compiled grammar is invalid. this is a bug.");
+
+        Ok(compiled)
     }
 
     pub fn push_ast<'ast>(&mut self, grammar: &'ast Grammar<'source>) -> Result<(), Error> {
@@ -141,14 +197,20 @@ impl<'source> Compiler<'source> {
     fn get_rule_index(&self, id: Id<'source>) -> Result<usize, Error> {
         self.names
             .get(&id)
-            .ok_or_else(|| Error::Undefined(id.to_string()))
+            .ok_or_else(|| {
+                Error::UndefinedSymbol {
+                    symbol: id.to_string(),
+                }
+            })
             .copied()
     }
 }
 
+/// Rule buffer that can be used to construct individual rules in their binary
+/// format.
 #[derive(Debug, Default)]
-struct Buffer {
-    elements: Vec<Element>,
+pub struct Buffer {
+    pub elements: Vec<Element>,
 }
 
 impl Buffer {
@@ -206,6 +268,11 @@ impl<'source> Compile<'source> for Grammar<'source> {
         _: (),
     ) -> Result<(), Error> {
         for production in &self.0 {
+            if compiler.names.contains_key(&production.lhs) {
+                return Err(Error::DuplicateSymbol {
+                    symbol: production.lhs.to_string(),
+                });
+            }
             compiler.new_placeholder(Some(production.lhs));
         }
 
@@ -367,32 +434,52 @@ impl<'source> Compile<'source> for CharClass {
     ) -> Result<(), Error> {
         let mut char_ranges = self.char_ranges.iter();
 
+        enum CharType {
+            Start,
+            StartNegated,
+            Alt,
+        }
+
+        let mut char_range = |start, end, ty| {
+            match ty {
+                CharType::Start => buffer.char(start),
+                CharType::StartNegated => buffer.char_not(start),
+                CharType::Alt => buffer.char_alt(start),
+            }
+            match end {
+                // valid range
+                Some(end) if start < end => buffer.char_range(end),
+                // invalid range
+                Some(end) if start > end => return Err(Error::InvalidCharRange { start, end }),
+                // either start == end or end is None
+                _ => {}
+            }
+            Ok(())
+        };
+
         if let Some(first) = char_ranges.next() {
             if self.negated {
                 match first {
-                    CharRange::Single(c) => buffer.char_not(*c),
+                    CharRange::Single(c) => char_range(*c, None, CharType::StartNegated)?,
                     CharRange::Range { start, end } => {
-                        buffer.char_not(*start);
-                        buffer.char_range(*end);
+                        char_range(*start, Some(*end), CharType::StartNegated)?
                     }
                 }
             }
             else {
                 match first {
-                    CharRange::Single(c) => buffer.char(*c),
+                    CharRange::Single(c) => char_range(*c, None, CharType::Start)?,
                     CharRange::Range { start, end } => {
-                        buffer.char(*start);
-                        buffer.char_range(*end);
+                        char_range(*start, Some(*end), CharType::Start)?
                     }
                 }
             }
 
             while let Some(next) = char_ranges.next() {
                 match next {
-                    CharRange::Single(c) => buffer.char_alt(*c),
+                    CharRange::Single(c) => char_range(*c, None, CharType::Alt)?,
                     CharRange::Range { start, end } => {
-                        buffer.char_alt(*start);
-                        buffer.char_range(*end);
+                        char_range(*start, Some(*end), CharType::Alt)?
                     }
                 }
             }
@@ -404,6 +491,11 @@ impl<'source> Compile<'source> for CharClass {
 
 #[cfg(test)]
 mod tests {
+    use crate::grammar::{
+        parse_and_compile,
+        Error,
+    };
+
     #[test]
     fn it_compiles_chess_example() {
         let s = r#"
@@ -422,9 +514,47 @@ pawn    ::= ([a-h] "x")? [a-h] [1-8] ("=" [NBKQR])?
 castle  ::= "O-O" "-O"?
         "#;
 
-        let ast = crate::grammar::parse(s).unwrap();
-        let compiled = crate::grammar::compile(&ast).unwrap();
-        println!("{:#?}", compiled);
+        let compiled = parse_and_compile(s).unwrap();
         compiled.check().unwrap();
+    }
+
+    #[test]
+    fn it_doesnt_compile_duplicate_symbols() {
+        let s = r#"
+root ::= foo*
+foo ::= "foo"
+foo ::= "bar"
+        "#;
+
+        match parse_and_compile(s) {
+            Err(Error::DuplicateSymbol { symbol }) => assert_eq!(symbol, "foo"),
+            _ => panic!("expected Error::DuplicateSymbol"),
+        }
+    }
+
+    #[test]
+    fn it_doesnt_compile_without_root() {
+        let s = r#"
+foo ::= "foo"
+        "#;
+
+        match parse_and_compile(s) {
+            Err(Error::NoRoot) => {}
+            Err(e) => panic!("expected Error::NoRoot but got another error: {e}"),
+            _ => panic!("expected Error::NoRootm but got Ok(_)"),
+        }
+    }
+
+    #[test]
+    fn it_doesnt_compile_undefined_ref() {
+        let s = r#"
+root ::= foo
+bar ::= "bar"
+        "#;
+
+        match parse_and_compile(s) {
+            Err(Error::UndefinedSymbol { symbol }) => assert_eq!(symbol, "foo"),
+            _ => panic!("expected Error::UndefinedSymbol"),
+        }
     }
 }

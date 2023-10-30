@@ -9,17 +9,12 @@ use std::{
 use color_eyre::eyre::Error;
 use futures::{
     pin_mut,
-    StreamExt,
+    TryStreamExt,
 };
 use llama_cpp::{
     backend::{
         context::ContextParameters,
-        sampling::{
-            SamplingMode,
-            SamplingParameters,
-            TopK,
-            TopP,
-        },
+        sampling::SamplingParameters,
         system_info,
     },
     loader::ModelLoader,
@@ -60,6 +55,10 @@ impl Args {
                 grammar,
                 prompt,
             } => {
+                let grammar = grammar
+                    .map(|path| llama_cpp::grammar::compile_from_source(path))
+                    .transpose()?;
+
                 let session_parameters = SessionParameters {
                     context: ContextParameters {
                         seed,
@@ -67,24 +66,11 @@ impl Args {
                         n_batch: 512,
                         ..Default::default()
                     },
+                    sampling: SamplingParameters {
+                        grammar,
+                        ..Default::default()
+                    },
                     batch_size: Some(64),
-                };
-
-                let grammar = grammar
-                    .map(|path| llama_cpp::grammar::compile_from_source(path))
-                    .transpose()?;
-
-                let sampling_parameters = SamplingParameters {
-                    mode: SamplingMode::Propability,
-                    repetition_penalties: None,
-                    soft_max: false,
-                    top_k: Some(TopK { k: 40, min_keep: 1 }),
-                    top_p: Some(TopP {
-                        p: 0.9,
-                        min_keep: 1,
-                    }),
-                    temperature: 0.4,
-                    grammar,
                 };
 
                 let model = ModelLoader::load(&model, Default::default())
@@ -98,12 +84,10 @@ impl Args {
 
                 session.push_text(&prompt, true, false);
 
-                let mut sampler = session.sampler(sampling_parameters)?;
-
-                let stream = sampler.pieces(None, [], false);
+                let stream = session.pieces(None, [], false);
                 pin_mut!(stream);
 
-                while let Some(piece) = stream.next().await {
+                while let Some(piece) = stream.try_next().await? {
                     print!("{piece}");
                     stdout().flush()?;
                 }

@@ -1,3 +1,5 @@
+//! Grammar loaded into llama.cpp
+
 use derivative::Derivative;
 
 use super::{
@@ -18,15 +20,12 @@ unsafe impl Send for Grammar {}
 impl Grammar {
     /// # Panics
     ///
-    /// Panics if the compiled grammar is invalid. This indicates a bug in the
-    /// compiler.
+    /// Panics if the compiled grammar is invalid.
     pub fn load(compiled: &Compiled) -> Self {
         tracing::trace!("loading grammar: {:#?}", compiled);
 
         // this checks that the grammar is valid such that it won't cause any UB below.
-        if let Err(e) = compiled.check() {
-            panic!("tried to load invalid grammar: {e}");
-        }
+        compiled.check().expect("grammar invalid");
 
         let handle = unsafe {
             // llama_grammar_init copies the rules into an internal vector, so it's safe to
@@ -45,10 +44,12 @@ impl Grammar {
     }
 
     /// # Safety
-    /// 
-    /// llama.cpp will abort the program, if stacks are empty. stacks can be empty if we accept tokens that the grammar can't accept.
-    /// So it's important to make sure to only accept tokens, that were actually sampled from the grammar.
-    pub(super) unsafe fn accept_token(&mut self, context: &mut Context, token: Token) {
+    ///
+    /// llama.cpp will abort the program, if stacks are empty. stacks can be
+    /// empty if we accept tokens that the grammar can't accept.
+    /// So it's important to make sure to only accept tokens that were actually
+    /// sampled from the grammar.
+    pub unsafe fn accept_token(&mut self, context: &mut Context, token: Token) {
         tracing::trace!("accept token: {}", token);
         llama_cpp_sys::llama_grammar_accept_token(context.handle, self.handle, token);
     }

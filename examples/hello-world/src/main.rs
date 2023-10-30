@@ -9,10 +9,9 @@ use std::{
 use color_eyre::eyre::Error;
 use futures::{
     pin_mut,
-    StreamExt,
+    TryStreamExt,
 };
 use llama_cpp::{
-    backend::sampling::SamplingParameters,
     loader::ModelLoader,
     session::Session,
 };
@@ -38,21 +37,22 @@ async fn main() -> Result<(), Error> {
         .await?;
 
     // prompt
-    let prompt = "The capital of Paris is";
+    let prompt = "The capital of France is";
     print!("{}", prompt);
     stdout().flush()?;
 
-    // create a session and feed prompt to it
+    // create a session
     let mut session = Session::new(model, Default::default());
+
+    // feed prompt to it.
     session.push_text(&prompt, true, false);
 
-    // create a sampler and a response stream from it
-    let mut sampler = session.sampler(SamplingParameters::default())?;
-    let stream = sampler.pieces(None, [], false);
+    // create a response stream from it
+    let stream = session.pieces(None, [], false);
     pin_mut!(stream);
 
     // stream LLM output piece by piece
-    while let Some(piece) = stream.next().await {
+    while let Some(piece) = stream.try_next().await? {
         print!("{piece}");
         stdout().flush()?;
     }

@@ -1,3 +1,5 @@
+//! Model quantization
+
 use std::path::Path;
 
 use super::{
@@ -58,7 +60,6 @@ pub async fn quantize(
     output: impl AsRef<Path>,
     parameters: &QuantizationParameters,
 ) -> Result<(), Error> {
-    // is this necessary?
     llama_init();
 
     let input = ffi_path(input)?;

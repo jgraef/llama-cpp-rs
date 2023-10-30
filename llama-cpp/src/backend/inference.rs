@@ -1,3 +1,5 @@
+//! LLM inference
+
 use itertools::Itertools;
 
 use super::{

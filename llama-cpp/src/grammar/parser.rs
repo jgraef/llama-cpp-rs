@@ -14,8 +14,6 @@ use nom::{
         newline,
         none_of,
         one_of,
-        space0,
-        space1,
     },
     combinator::{
         all_consuming,
@@ -74,30 +72,6 @@ fn consume_comment(input: &str) -> Res<()> {
 trait Ws {
     fn consume<'a>(input: &'a str) -> Res<'a, ()>;
     fn consume1<'a>(input: &'a str) -> Res<'a, ()>;
-}
-
-pub struct SingleLine;
-
-impl Ws for SingleLine {
-    fn consume<'a>(input: &'a str) -> Res<'a, ()> {
-        value((), space0)(input)
-    }
-
-    fn consume1<'a>(input: &'a str) -> Res<'a, ()> {
-        value((), space1)(input)
-    }
-}
-
-pub struct MultiLine;
-
-impl Ws for MultiLine {
-    fn consume<'a>(input: &'a str) -> Res<'a, ()> {
-        value((), multispace0)(input)
-    }
-
-    fn consume1<'a>(input: &'a str) -> Res<'a, ()> {
-        value((), multispace1)(input)
-    }
 }
 
 /// consumes whitespace and comments
@@ -209,9 +183,7 @@ fn parse_term<'a>(input: &'a str) -> Res<'a, Term> {
         alt((
             map(parse_literal, Term::Literal),
             map(parse_char_class, Term::CharClass),
-            map(parse_parenthesis, |expression| {
-                Term::Parenthesis(Box::new(expression))
-            }),
+            map(parse_parenthesis, Term::Parenthesis),
             map(parse_rule_ref, Term::Rule),
         )),
     )(input)

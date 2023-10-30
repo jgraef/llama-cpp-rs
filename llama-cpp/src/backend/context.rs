@@ -1,7 +1,6 @@
-use std::{
-    marker::PhantomData,
-    slice,
-};
+//! LLM context
+
+use std::slice;
 
 use super::{
     batch::Batch,
@@ -23,6 +22,7 @@ impl Default for KvCacheType {
     }
 }
 
+/// Parameters for a llama context.
 #[derive(Clone, Debug)]
 pub struct ContextParameters {
     /// RNG seed, `None` for random.
@@ -44,11 +44,11 @@ pub struct ContextParameters {
     /// RoPE base frequency. If set to `None`, it will take the parameter from
     /// the model.
     ///
-    /// See https://github.com/ggerganov/llama.cpp/pull/2054
+    /// See <https://github.com/ggerganov/llama.cpp/pull/2054>
     pub rope_freq_base: Option<f32>,
 
     // RoPE frequency scaling factor. If set to `None`, it will take the parameter from the model.
-    /// See https://github.com/ggerganov/llama.cpp/pull/2054
+    /// See <https://github.com/ggerganov/llama.cpp/pull/2054>
     pub rope_fre_scale: Option<f32>,
 
     /// If true, use experimental mul_mat_q kernels
@@ -64,7 +64,19 @@ pub struct ContextParameters {
     pub embedding_only: bool,
 }
 
+/// Error returned by [`ContextParameters::check`]
+#[derive(Debug, thiserror::Error)]
+pub enum CheckError {
+    // todo
+}
+
 impl ContextParameters {
+    /// Checks of the context parameters are valid.
+    pub fn check(&self) -> Result<(), CheckError> {
+        // todo
+        Ok(())
+    }
+
     fn to_ffi(&self) -> llama_cpp_sys::llama_context_params {
         llama_cpp_sys::llama_context_params {
             seed: self.seed.unwrap_or(u32::MAX),
@@ -100,6 +112,9 @@ impl Default for ContextParameters {
     }
 }
 
+/// A llama context.
+///
+/// This is the low-level interface to drive a LLM.
 pub struct Context {
     pub(super) handle: *mut llama_cpp_sys::llama_context,
 
@@ -111,7 +126,14 @@ pub struct Context {
 unsafe impl Send for Context {}
 
 impl Context {
-    pub(super) fn new(model: Model, parameters: &ContextParameters) -> Self {
+    /// Creates a new context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the context parameters are invalid.
+    pub fn new(model: Model, parameters: &ContextParameters) -> Self {
+        parameters.check().unwrap();
+
         let parameters = parameters.to_ffi();
         tracing::trace!("creating context: {:#?}", parameters);
 
@@ -121,6 +143,7 @@ impl Context {
         Self { handle, model }
     }
 
+    /// Return the model this context uses.
     pub fn model(&self) -> &Model {
         &self.model
     }
@@ -129,7 +152,7 @@ impl Context {
         unsafe { llama_cpp_sys::llama_n_ctx(self.handle) as u32 }
     }
 
-    pub fn get_state(&mut self) -> Vec<u8> {
+    pub fn get_state(&self) -> Vec<u8> {
         let state_size = unsafe { llama_cpp_sys::llama_get_state_size(self.handle) };
 
         let mut buf = Vec::with_capacity(state_size);
@@ -143,8 +166,15 @@ impl Context {
         buf
     }
 
-    pub fn load_state(&mut self, data: &[u8]) -> Result<(), Error> {
+    /// Load state from data.
+    ///
+    /// # Safety
+    ///
+    /// llama.cpp just asserts that everything is alright, so the program will
+    /// crash if the data is incorrect :(
+    pub unsafe fn load_state(&mut self, data: &[u8]) -> Result<(), Error> {
         let state_size = unsafe { llama_cpp_sys::llama_get_state_size(self.handle) };
+
         if data.len() < state_size {
             return Err(Error::InvalidStateDataLength {
                 expected: state_size,
@@ -152,10 +182,9 @@ impl Context {
             });
         }
 
-        unsafe {
-            // note: the ffi binding wants *mut, but I'm pretty sure it doesn't modify it.
-            llama_cpp_sys::llama_set_state_data(self.handle, data.as_ptr() as *mut _);
-        }
+        // note: the ffi binding wants *mut for the data, but I'm pretty sure it doesn't
+        // modify it.
+        llama_cpp_sys::llama_set_state_data(self.handle, data.as_ptr() as *mut _);
 
         Ok(())
     }
@@ -206,10 +235,4 @@ pub enum DecodeWarning {
 
     #[error("unknown warning: {0}")]
     Unknown(i32),
-}
-
-pub struct Logits<'a> {
-    data: *const f32,
-    n_vocab: usize,
-    _lifetime: PhantomData<&'a ()>,
 }

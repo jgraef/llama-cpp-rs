@@ -6,6 +6,7 @@ use super::{
     Token,
 };
 
+/// llama batch
 pub struct Batch {
     pub(super) data: llama_cpp_sys::llama_batch,
     tokens_buf_size: usize,
@@ -15,9 +16,15 @@ pub struct Batch {
 unsafe impl Send for Batch {}
 
 impl Batch {
-    pub(super) fn new(n_tokens: usize, n_seq_max: usize) -> Self {
-        tracing::trace!(n_tokens, n_seq_max, "calling llama_batch_init");
+    /// Create new batch
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n_tokens` is 0.
+    pub fn new(n_tokens: usize, n_seq_max: usize) -> Self {
+        assert!(n_tokens > 0);
 
+        tracing::trace!(n_tokens, n_seq_max, "calling llama_batch_init");
         let data = unsafe {
             // for `embd` we need to pass 0, otherwise data.tokens is not allocated and thus
             // we are unsafe. we should write a separate `Batch` for embedding.
@@ -31,19 +38,18 @@ impl Batch {
         }
     }
 
+    /// Returns the size of the token buffer.
     pub fn size(&self) -> usize {
         self.tokens_buf_size
     }
 
-    pub fn n_tokens(&self) -> i32 {
-        self.data.n_tokens
-    }
-
-    pub(super) fn clear(&mut self) {
+    /// Clears the batch, i.e. setting its token count to 0.
+    pub fn clear(&mut self) {
         tracing::trace!("batch_clear");
         self.data.n_tokens = 0;
     }
 
+    /// Add token to batch.
     pub(super) fn add(&mut self, id: Token, pos: Pos, seq_ids: &[SeqId], logits: bool) {
         /* from llama.cpp/common.common.cpp
         ```cpp
@@ -98,9 +104,10 @@ impl Batch {
         self.data.n_tokens += 1;
     }
 
-    /// sets the last logits in the buffer
+    /// Sets the last logits in the buffer.
     ///
     /// if there aren't any logits in the buffer, it does nothing.
+    #[allow(dead_code)]
     pub(super) fn set_last_logits(&mut self, logits: bool) {
         let Some(n_tokens) = (self.data.n_tokens as usize).checked_sub(1)
         else {

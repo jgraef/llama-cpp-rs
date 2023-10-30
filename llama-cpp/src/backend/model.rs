@@ -1,3 +1,5 @@
+//! Large Language Model
+
 use std::{
     ffi::c_void,
     path::{
@@ -90,6 +92,9 @@ impl Drop for ModelInner {
 unsafe impl Send for ModelInner {}
 unsafe impl Sync for ModelInner {}
 
+/// A LLM ready to use.
+///
+/// This internally uses an `Arc`, so it's cheap to clone.
 #[derive(Clone)]
 pub struct Model {
     pub(super) inner: Arc<ModelInner>,
@@ -250,6 +255,11 @@ impl Model {
     }
 }
 
+/// Buffer to decode tokens.
+///
+/// [`Model`]s produce [`Token`]s and these don't necessarily translate directly
+/// to valid UTF-8. It might be necessary to first buffer a few tokens (decoded
+/// into bytes).
 pub struct TokenDecoder {
     model: Model,
     buf: Vec<u8>,
@@ -269,8 +279,33 @@ impl TokenDecoder {
         self.model.token_to_piece(token, &mut self.buf);
     }
 
-    pub fn get_str(&self) -> Option<&str> {
-        std::str::from_utf8(&self.buf).ok()
+    /// Returns the internal buffer as `String`. This returns `None` if the
+    /// UTF-8 parsing fails, which means that more tokens are needed.
+    pub fn pop_string(&mut self) -> Option<String> {
+        let data = std::mem::replace(&mut self.buf, vec![]);
+
+        let data = if self.strip_leading_space {
+            self.strip_leading_space = false;
+            if let Some(stripped) = data.strip_prefix(b" ") {
+                stripped.to_owned()
+            }
+            else {
+                data
+            }
+        }
+        else {
+            data
+        };
+
+        match String::from_utf8(data) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                // put the bytes back into the buffer
+                // note, that they are now already stripped, which is fine.
+                self.buf = e.into_bytes();
+                None
+            }
+        }
     }
 
     pub fn clear(&mut self) {
@@ -279,17 +314,7 @@ impl TokenDecoder {
 
     pub fn decode(&mut self, token: Token) -> Option<String> {
         self.push_token(token);
-        let s = self.get_str()?;
-
-        let s = if self.strip_leading_space {
-            let s = s.trim_start_matches(' ').to_owned();
-            self.strip_leading_space = false;
-            s
-        }
-        else {
-            s.to_owned()
-        };
-
+        let s = self.pop_string()?;
         self.clear();
         Some(s)
     }

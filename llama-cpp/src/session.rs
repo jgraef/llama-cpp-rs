@@ -1,9 +1,41 @@
+//! Inference session
+//!
+//! This provides asynchronous interfaces to drive a LLM. Internally it spawns
+//! a thread which runs the LLM, and communicates with it through a channel.
+//!
+//! # Example
+//!
+//! ```
+//! # use std::io::{stdout, Write};
+//! # use llama_cpp::{loader::ModelLoader, session::Session, Error};
+//! # use futures::{stream::TryStreamExt, pin_mut};
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Error> {
+//! # let model = ModelLoader::load("../data/TinyLLama-v0.gguf", Default::default()).wait_for_model().await?;
+//! // first create an inference session.
+//! let mut session = Session::new(model, Default::default());
+//!
+//! // push your prompt into it.
+//! session.push_text("Write a poem.", true, false);
+//!
+//! // get a stream of word pieces.
+//! let stream = session.pieces(None, [], false);
+//! pin_mut!(stream);
+//!
+//! // stream LLM output piece by piece
+//! while let Some(piece) = stream.try_next().await? {
+//!     print!("{piece}");
+//!     stdout().flush()?;
+//! }
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # Lock-step mode
 //!
 //! The [`TokenStream`] and [`PieceStream`] can be run in lock-step mode. To
-//! enable this pass `lock_step = true` to [`Sampler::tokens`] or
-//! [`Sampler::pieces`].
+//! enable this pass `lock_step = true` to [`Session::tokens`] or
+//! [`Session::pieces`].
 //!
 //! In lock-step mode the background thread will wait with sampling the next
 //! token until the the stream is polled for the next item. This ensures you
@@ -14,7 +46,7 @@
 //!
 //! If not in lock-step mode the sampling will continue in the background until
 //! max tokens or a stop token is reached. This means if you stop the token
-//! stream the context may already have additional tokens sampled (and decoded).
+//! stream the context may already have additional tokens sampled and decoded.
 //! These tokens will be returned by [`TokenStream::stop`] and
 //! [`PieceStream::stop`].
 
@@ -45,7 +77,7 @@ use crate::{
             TokenDecoder,
         },
         sampling::{
-            Sampler as SyncSampler,
+            Sampler,
             SamplingParameters,
         },
         Token,
@@ -53,21 +85,67 @@ use crate::{
     Error,
 };
 
+#[derive(Debug, thiserror::Error)]
+pub enum CheckError {
+    #[error("invalid context parameters")]
+    Context(#[from] crate::backend::context::CheckError),
+
+    #[error("invalid sampling parameters")]
+    Sampling(#[from] crate::backend::sampling::CheckError),
+
+    #[error("invalid batch size: {0}")]
+    BatchSize(usize),
+}
+
+/// Session parameters
 #[derive(Clone, Debug, Default)]
 pub struct SessionParameters {
+    /// Parameters to create the llama context.
     pub context: ContextParameters,
 
+    /// Parameters for the sampler.
+    pub sampling: SamplingParameters,
+
+    /// The batch size to use. If `None` the max batch size from the context
+    /// will be used.
     // todo: i think we can remove this and just use the max batch size in context.
     pub batch_size: Option<usize>,
 }
 
+impl SessionParameters {
+    /// Checks if the session parameters are valid
+    pub fn check(&self) -> Result<(), CheckError> {
+        self.context.check()?;
+        self.sampling.check()?;
+        self.batch_size
+            .map(|b| {
+                if b == 0 {
+                    Err(CheckError::BatchSize(b))
+                }
+                else {
+                    Ok::<(), CheckError>(())
+                }
+            })
+            .transpose()?;
+        Ok(())
+    }
+}
+
+/// Inference session
 pub struct Session {
     model: Model,
     tx: mpsc::UnboundedSender<Command>,
 }
 
 impl Session {
+    /// Creates a new inference session.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the session parameters are invalid.
     pub fn new(model: Model, session_parameters: SessionParameters) -> Self {
+        session_parameters.check().unwrap();
+
         let (tx, rx) = mpsc::unbounded_channel();
 
         // spawn thread that runs the sync llama code
@@ -83,23 +161,57 @@ impl Session {
         self.tx.send(command).expect("session thread terminated")
     }
 
+    /// Push tokens (your prompt) into the LLM.
     pub fn push_tokens(&self, tokens: Vec<Token>) {
         self.send_command(Command::Push { tokens });
     }
 
+    /// Tokenize the text (your prompt) and push it into the LLM.
     pub fn push_text(&self, text: &str, add_bos: bool, allow_special: bool) {
         let tokens = self.model.tokenize(text, add_bos, allow_special);
         self.push_tokens(tokens);
     }
 
-    pub fn sampler<'a>(
-        &'a mut self,
-        sampling_parameters: SamplingParameters,
-    ) -> Result<Sampler<'a>, Error> {
-        self.send_command(Command::SetSampler {
-            sampler: SyncSampler::new(sampling_parameters)?,
+    /// Reset the sampler and optionally set new sampling parameters.
+    pub fn reset_sampler(&self, parameters: Option<SamplingParameters>) {
+        self.send_command(Command::ResetSampler { parameters })
+    }
+
+    /// Returns a stream of [`Token`]s.
+    pub fn tokens<'session>(
+        &'session mut self,
+        max_tokens: Option<usize>,
+        stop_tokens: impl IntoIterator<Item = Token>,
+        lock_step: bool,
+    ) -> TokenStream<'session> {
+        let (tx, rx) = mpsc::channel(max_tokens.unwrap_or(TokenStream::DEFAULT_CHANNEL_SIZE));
+
+        self.send_command(Command::Sample {
+            max_tokens,
+            stop_tokens: stop_tokens.into_iter().collect(),
+            tx,
+            lock_step,
         });
-        Ok(Sampler { session: self })
+
+        TokenStream {
+            rx: Some(rx),
+            _session: self,
+            stop_reason: None,
+            tx_continue: None,
+        }
+    }
+
+    /// Returns a stream of text pieces (words or fragments of words).
+    pub fn pieces<'session>(
+        &'session mut self,
+        max_tokens: Option<usize>,
+        stop_tokens: impl IntoIterator<Item = Token>,
+        lock_step: bool,
+    ) -> PieceStream<'session> {
+        let token_decoder = self.model.token_decoder();
+
+        self.tokens(max_tokens, stop_tokens, lock_step)
+            .into_pieces(token_decoder)
     }
 }
 
@@ -110,23 +222,30 @@ fn session_thread(
 ) {
     let _span = tracing::debug_span!("session thread started");
     tracing::debug!("model: {}", model.path().display());
-    tracing::debug!(?parameters);
+    tracing::trace!(?parameters);
 
     let mut context = model.context(&parameters.context);
     let batch_size = parameters
         .batch_size
         .unwrap_or(parameters.context.n_batch as _);
     let mut inference = Inference::new(&mut context, batch_size);
-    let mut sampler = None;
+    let mut sampler = Sampler::new(parameters.sampling);
 
     while let Some(command) = rx.blocking_recv() {
         let result = (|| {
             match command {
                 Command::Push { tokens } => {
+                    // feed the prompt tokens in case the sampler needs them.
+                    for token in &tokens {
+                        sampler.feed_prompt_token(*token);
+                    }
+
+                    // feed the prompt into inference.
                     inference.push(&tokens)?;
                 }
-                Command::SetSampler { sampler: s } => {
-                    sampler = Some(s);
+                Command::ResetSampler { parameters } => {
+                    let parameters = parameters.unwrap_or_else(|| sampler.parameters().clone());
+                    sampler = Sampler::new(parameters);
                 }
                 Command::Sample {
                     max_tokens,
@@ -134,13 +253,22 @@ fn session_thread(
                     tx,
                     lock_step,
                 } => {
-                    // the session proxy must uphold the invariant that `Command::SetSampler` is
-                    // always called at least once before sampling.
-                    let sampler = sampler.as_mut().expect("sampler not set");
-
                     let mut i: usize = 0;
 
-                    while let Some(token) = inference.sample(sampler)? {
+                    loop {
+                        let token = match inference.sample(&mut sampler) {
+                            Ok(Some(token)) => token,
+                            Ok(None) => {
+                                // eos
+                                break;
+                            }
+                            Err(e) => {
+                                // an error occured.
+                                tx.blocking_send(SampleStreamItem::Error(e)).ok();
+                                break;
+                            }
+                        };
+
                         // if we found a stop token, we stop.
                         if stop_tokens.contains(&token) {
                             tx.blocking_send(SampleStreamItem::Stop {
@@ -213,8 +341,8 @@ enum Command {
     Push {
         tokens: Vec<Token>,
     },
-    SetSampler {
-        sampler: SyncSampler,
+    ResetSampler {
+        parameters: Option<SamplingParameters>,
     },
     Sample {
         max_tokens: Option<usize>,
@@ -224,10 +352,16 @@ enum Command {
     },
 }
 
+/// The reason why the LLM output was stopped.
 #[derive(Clone, Copy, Debug)]
 pub enum StopReason {
+    /// The user requested the stop.
     User,
+
+    /// A stop token was encountered.
     StopToken(Token),
+
+    /// The token limit was reached.
     MaxTokens(usize),
 }
 
@@ -245,57 +379,18 @@ enum SampleStreamItem {
         token: Token,
         tx_continue: Option<oneshot::Sender<ShouldContinue>>,
     },
+    Error(crate::backend::Error),
 }
 
-pub struct Sampler<'session> {
-    session: &'session mut Session,
-}
-
-impl<'session> Sampler<'session> {
-    pub fn tokens<'sampler>(
-        &'sampler mut self,
-        max_tokens: Option<usize>,
-        stop_tokens: impl IntoIterator<Item = Token>,
-        lock_step: bool,
-    ) -> TokenStream<'session, 'sampler> {
-        let (tx, rx) = mpsc::channel(max_tokens.unwrap_or(TokenStream::DEFAULT_CHANNEL_SIZE));
-
-        self.session.send_command(Command::Sample {
-            max_tokens,
-            stop_tokens: stop_tokens.into_iter().collect(),
-            tx,
-            lock_step,
-        });
-
-        TokenStream {
-            rx: Some(rx),
-            _sampler: self,
-            stop_reason: None,
-            tx_continue: None,
-        }
-    }
-
-    pub fn pieces<'sampler>(
-        &'sampler mut self,
-        max_tokens: Option<usize>,
-        stop_tokens: impl IntoIterator<Item = Token>,
-        lock_step: bool,
-    ) -> PieceStream<'session, 'sampler> {
-        let token_decoder = self.session.model.token_decoder();
-
-        self.tokens(max_tokens, stop_tokens, lock_step)
-            .into_pieces(token_decoder)
-    }
-}
-
-pub struct TokenStream<'session, 'sampler> {
+/// Streams individual tokens from a LLM.
+pub struct TokenStream<'session> {
     rx: Option<mpsc::Receiver<SampleStreamItem>>,
 
     /// # Note
     ///
-    /// We pass the sampler, so that the sampler is exclusively borrowed by this
+    /// We pass the session, so that the session is exclusively borrowed by this
     /// and thus the user can't start multiple token streams at the same time.
-    _sampler: &'sampler mut Sampler<'session>,
+    _session: &'session mut Session,
 
     /// the stop reason. we either receive this from the session thread, or set
     /// it ourselves.
@@ -306,7 +401,7 @@ pub struct TokenStream<'session, 'sampler> {
     tx_continue: Option<oneshot::Sender<ShouldContinue>>,
 }
 
-impl<'session, 'sampler> TokenStream<'session, 'sampler> {
+impl<'session> TokenStream<'session> {
     const DEFAULT_CHANNEL_SIZE: usize = 512;
 
     fn lock_step_signal(&mut self, should_continue: ShouldContinue) {
@@ -339,12 +434,13 @@ impl<'session, 'sampler> TokenStream<'session, 'sampler> {
     /// This also sets the `stop_reason` to `StopReason::User`.
     ///
     /// Returns tokens that were already sampled, but not received by the stream
-    /// yet.
-    pub fn stop(&mut self) -> Vec<Token> {
+    /// yet. If an error occured in the sampling thread, it returns this
+    /// instead.
+    pub fn stop(&mut self) -> Result<Vec<Token>, Error> {
         // if `self.rx` is `None`, we already stopped the stream, thus we do nothing.
         let Some(mut rx) = self.rx.take()
         else {
-            return vec![];
+            return Ok(vec![]);
         };
 
         // close sampler stream.
@@ -361,6 +457,10 @@ impl<'session, 'sampler> TokenStream<'session, 'sampler> {
                 SampleStreamItem::Stop { reason: _ } => {
                     // the stream was also terminated by the session thread. we
                     // set this as stop reason.
+                }
+                SampleStreamItem::Error(e) => {
+                    // the session thread encountered an error.
+                    return Err(e.into());
                 }
                 SampleStreamItem::Token {
                     token,
@@ -387,14 +487,17 @@ impl<'session, 'sampler> TokenStream<'session, 'sampler> {
             self.stop_reason = Some(StopReason::User);
         }
 
-        leftover
+        Ok(leftover)
     }
 
+    /// Returns the stop reason, if the stream has stopped.
     pub fn stop_reason(&self) -> Option<StopReason> {
         self.stop_reason
     }
 
-    pub fn into_pieces(self, token_decoder: TokenDecoder) -> PieceStream<'session, 'sampler> {
+    /// Turns the token stream into a [`PieceStream`]. You can get the
+    /// [`TokenDecoder`] from your [`Model`].
+    pub fn into_pieces(self, token_decoder: TokenDecoder) -> PieceStream<'session> {
         PieceStream {
             token_stream: self,
             token_decoder,
@@ -402,8 +505,8 @@ impl<'session, 'sampler> TokenStream<'session, 'sampler> {
     }
 }
 
-impl<'session, 'sampler> Stream for TokenStream<'session, 'sampler> {
-    type Item = Token;
+impl<'session> Stream for TokenStream<'session> {
+    type Item = Result<Token, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // if we have a tx_continue stored, we need to send a continue signal on it, so
@@ -415,12 +518,13 @@ impl<'session, 'sampler> Stream for TokenStream<'session, 'sampler> {
                 match item_opt {
                     Some(SampleStreamItem::Token { token, tx_continue }) => {
                         self.tx_continue = tx_continue;
-                        Some(token)
+                        Some(Ok(token))
                     }
                     Some(SampleStreamItem::Stop { reason }) => {
                         self.stop_reason = Some(reason);
                         None
                     }
+                    Some(SampleStreamItem::Error(e)) => Some(Err(e.into())),
                     None => None,
                 }
             })
@@ -431,12 +535,13 @@ impl<'session, 'sampler> Stream for TokenStream<'session, 'sampler> {
     }
 }
 
-pub struct PieceStream<'session, 'sampler> {
-    token_stream: TokenStream<'session, 'sampler>,
+/// A stream of text pieces.
+pub struct PieceStream<'session> {
+    token_stream: TokenStream<'session>,
     token_decoder: TokenDecoder,
 }
 
-impl<'session, 'sampler> PieceStream<'session, 'sampler> {
+impl<'session> PieceStream<'session> {
     /// Signals the sampler to continue with sampling the next token.
     ///
     /// If not in lock-step mode, this does nothing.
@@ -448,17 +553,40 @@ impl<'session, 'sampler> PieceStream<'session, 'sampler> {
         self.token_stream.proceed();
     }
 
-    pub fn stop(&mut self) -> Vec<Token> {
-        self.token_stream.stop()
+    /// Signals the sampler to stop.
+    ///
+    /// If not in lock-step mode, this will stop the sampler, but it might
+    /// already have sampled additional tokens.
+    ///
+    /// If in lock-step mode, this will stop the sampler before it samples
+    /// another token.
+    ///
+    /// This also sets the `stop_reason` to `StopReason::User`.
+    ///
+    /// Returns text that was already sampled, but not received by the stream
+    /// yet. If an error occured in the sampling thread, it returns this
+    /// instead.
+    pub fn stop(&mut self) -> Result<String, Error> {
+        let tokens = self.token_stream.stop()?;
+        for token in tokens {
+            self.token_decoder.push_token(token);
+        }
+        Ok(self.token_decoder.pop_string().unwrap_or_default())
     }
 
+    /// Returns the stop reason, if the stream has stopped.
     pub fn stop_reason(&self) -> Option<StopReason> {
         self.token_stream.stop_reason()
     }
+
+    /// Turns this into a token stream.
+    pub fn into_tokens(self) -> TokenStream<'session> {
+        self.token_stream
+    }
 }
 
-impl<'session, 'sampler> Stream for PieceStream<'session, 'sampler> {
-    type Item = String;
+impl<'session> Stream for PieceStream<'session> {
+    type Item = Result<String, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
@@ -471,10 +599,13 @@ impl<'session, 'sampler> Stream for PieceStream<'session, 'sampler> {
                     // todo: check if we have some stray bytes in the buffer.
                     return Poll::Ready(None);
                 }
-                Poll::Ready(Some(token)) => {
+                Poll::Ready(Some(Err(e))) => {
+                    return Poll::Ready(Some(Err(e)));
+                }
+                Poll::Ready(Some(Ok(token))) => {
                     if let Some(piece) = self.token_decoder.decode(token) {
                         // if we have a piece ready, we can return that from the stream.
-                        return Poll::Ready(Some(piece));
+                        return Poll::Ready(Some(Ok(piece)));
                     }
                     else {
                         // if we don't have a piece ready, we need to continue

@@ -26,13 +26,13 @@ Both [Tokio][2] and [async-std][3] are supported. You choose which one is used b
 ## Features
 
  - [x] Text Generation
- - [_] Embedding
- - [_] GPU support
- - [_] LORA
+ - [ ] Embedding
+ - [ ] GPU support
+ - [ ] LORA
  - [x] grammar sampling
- - [_] repetition penalties
- - [_] beam search
- - [_] classifier free guidance
+ - [ ] repetition penalties
+ - [ ] beam search
+ - [ ] classifier free guidance
  - [x] tokio runtime
  - [x] async-std runtime
 

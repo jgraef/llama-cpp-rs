@@ -107,7 +107,7 @@ impl Args {
                 let mut buf = Vec::with_capacity(32);
 
                 for i in 0..n_vocab {
-                    model.token_to_piece(i as _, &mut buf);
+                    model.get_token_text(i as _, &mut buf);
 
                     if let Ok(s) = std::str::from_utf8(&buf) {
                         println!("{i} = '{s}'");

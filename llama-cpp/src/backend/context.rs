@@ -4,23 +4,11 @@ use std::slice;
 
 use super::{
     batch::Batch,
+    default_n_threads,
     model::Model,
     Error,
-    DEFAULT_N_THREADS,
     DEFAULT_SEED,
 };
-
-#[derive(Clone, Copy, Debug)]
-pub enum KvCacheType {
-    F16,
-    F32,
-}
-
-impl Default for KvCacheType {
-    fn default() -> Self {
-        Self::F16
-    }
-}
 
 /// Parameters for a llama context.
 #[derive(Clone, Debug)]
@@ -82,8 +70,8 @@ impl ContextParameters {
             seed: self.seed.unwrap_or(u32::MAX),
             n_ctx: self.n_ctx.unwrap_or(0),
             n_batch: self.n_batch,
-            n_threads: self.n_threads.unwrap_or(*DEFAULT_N_THREADS),
-            n_threads_batch: self.n_threads_batch.unwrap_or(*DEFAULT_N_THREADS),
+            n_threads: self.n_threads.unwrap_or(default_n_threads()),
+            n_threads_batch: self.n_threads_batch.unwrap_or(default_n_threads()),
             rope_freq_base: self.rope_freq_base.unwrap_or_default(),
             rope_freq_scale: self.rope_fre_scale.unwrap_or_default(),
             mul_mat_q: self.mul_mat_q,
@@ -219,6 +207,17 @@ impl Context {
             slice::from_raw_parts(data, n_vocab as usize)
         }
     }
+
+    /// Returns performance information.
+    pub fn timings(&self) -> Timings {
+        unsafe { llama_cpp_sys::llama_get_timings(self.handle) }
+    }
+
+    pub fn reset_timings(&mut self) {
+        unsafe {
+            llama_cpp_sys::llama_reset_timings(self.handle);
+        }
+    }
 }
 
 impl Drop for Context {
@@ -236,3 +235,17 @@ pub enum DecodeWarning {
     #[error("unknown warning: {0}")]
     Unknown(i32),
 }
+
+#[derive(Clone, Copy, Debug)]
+pub enum KvCacheType {
+    F16,
+    F32,
+}
+
+impl Default for KvCacheType {
+    fn default() -> Self {
+        Self::F16
+    }
+}
+
+pub type Timings = llama_cpp_sys::llama_timings;

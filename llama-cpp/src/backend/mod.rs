@@ -14,6 +14,7 @@ pub mod quantization;
 pub mod sampling;
 
 use std::{
+    cell::OnceCell,
     ffi::{
         c_char,
         c_void,
@@ -31,8 +32,6 @@ use std::{
     },
 };
 
-use lazy_static::lazy_static;
-
 /// Max number of devices that can be used to split a tensor computations in
 /// between.
 ///
@@ -44,9 +43,11 @@ pub const MAX_DEVICES: usize = llama_cpp_sys::llama_define_max_devices;
 /// This is defined by the llama.cpp library.
 pub const DEFAULT_SEED: u32 = llama_cpp_sys::llama_define_default_seed;
 
-lazy_static! {
-    /// Default number of threads. This is lazily initialized to be the number of physical cores, as reported by the [num_cpus](https://docs.rs/num_cpus/latest/num_cpus/) crate.
-    pub static ref DEFAULT_N_THREADS: u32 = num_cpus::get_physical() as u32;
+const DEFAULT_N_THREADS: OnceCell<u32> = OnceCell::new();
+
+/// Default number of threads. This returns the number of physical cores, as reported by the [num_cpus](https://docs.rs/num_cpus/latest/num_cpus/) crate.
+pub fn default_n_threads() -> u32 {
+    *DEFAULT_N_THREADS.get_or_init(|| num_cpus::get_physical() as _)
 }
 
 unsafe extern "C" fn llama_log_callback(
@@ -219,13 +220,14 @@ impl FType {
 }
 
 /// The vocabulary type used by a model.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum VocabType {
     Spm,
     Bpe,
 }
 
 impl VocabType {
-    pub fn from_ffi(x: llama_cpp_sys::llama_vocab_type) -> Self {
+    fn from_ffi(x: llama_cpp_sys::llama_vocab_type) -> Self {
         match x {
             llama_cpp_sys::llama_vocab_type::LLAMA_VOCAB_TYPE_SPM => Self::Spm,
             llama_cpp_sys::llama_vocab_type::LLAMA_VOCAB_TYPE_BPE => Self::Bpe,
@@ -237,9 +239,39 @@ impl VocabType {
 ///
 /// This is defined by llama.cpp to be just an `i32`.
 ///
-/// You can use [`model::Model::tokenize`] to turn a string into tokens and
-/// [`model::Model::token_to_piece`] turn a token into its corresponding text.
+/// You can use [`Model::tokenize`](model::Model::tokenize) to turn a string
+/// into tokens and [`TokenDecoder`](model::TokenDecoder) turn a token into its
+/// corresponding text.
 pub type Token = llama_cpp_sys::llama_token;
+
+/// Type of a token.
+///
+/// You can get the type of a token by calling
+/// [`Model::get_token_type`](model::Model::get_token_type).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TokenType {
+    Undefined,
+    Normal,
+    Unknown,
+    Control,
+    UserDefined,
+    Unused,
+    Byte,
+}
+
+impl TokenType {
+    fn from_ffi(x: llama_cpp_sys::llama_token_type) -> Self {
+        match x {
+            llama_cpp_sys::llama_token_type::LLAMA_TOKEN_TYPE_UNDEFINED => Self::Undefined,
+            llama_cpp_sys::llama_token_type::LLAMA_TOKEN_TYPE_NORMAL => Self::Normal,
+            llama_cpp_sys::llama_token_type::LLAMA_TOKEN_TYPE_UNKNOWN => Self::Unknown,
+            llama_cpp_sys::llama_token_type::LLAMA_TOKEN_TYPE_CONTROL => Self::Control,
+            llama_cpp_sys::llama_token_type::LLAMA_TOKEN_TYPE_USER_DEFINED => Self::UserDefined,
+            llama_cpp_sys::llama_token_type::LLAMA_TOKEN_TYPE_UNUSED => Self::Unused,
+            llama_cpp_sys::llama_token_type::LLAMA_TOKEN_TYPE_BYTE => Self::Byte,
+        }
+    }
+}
 
 type Pos = llama_cpp_sys::llama_pos;
 type SeqId = llama_cpp_sys::llama_seq_id;

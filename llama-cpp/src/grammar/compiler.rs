@@ -140,13 +140,20 @@ impl Compiled {
     }
 }
 
+/// Compiles an AST ([`ast`](super::ast)) into a binary grammar ([`Compiled`]).
 #[derive(Default)]
-pub(super) struct Compiler<'source> {
+pub struct Compiler<'source> {
     names: HashMap<Id<'source>, usize>,
     rules: Vec<Rule<'source>>,
 }
 
 impl<'source> Compiler<'source> {
+    /// Compile into binary format.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compiled grammar is invalid. This indicates a bug in the
+    /// compiler.
     pub fn finish(self, root: Id<'source>) -> Result<Compiled, Error> {
         let root = self.get_rule_index(root).map_err(|_| Error::NoRoot)?;
 
@@ -165,12 +172,14 @@ impl<'source> Compiler<'source> {
         Ok(compiled)
     }
 
+    /// Push an [`ast::Grammar`](Grammar) rule into the compiler.
     pub fn push_ast<'ast>(&mut self, grammar: &'ast Grammar<'source>) -> Result<(), Error> {
         grammar.compile(self, ())?;
         Ok(())
     }
 
-    fn new_placeholder(&mut self, id: Option<Id<'source>>) -> usize {
+    /// Create a new rule without code (yet) and return its index.
+    pub fn new_placeholder(&mut self, id: Option<Id<'source>>) -> usize {
         let index = self.rules.len();
         self.rules.push(Rule::Placeholder(id));
         if let Some(id) = id {
@@ -179,13 +188,19 @@ impl<'source> Compiler<'source> {
         index
     }
 
-    fn new_ready(&mut self, buffer: Buffer) -> usize {
+    /// Create a new rule from binary format and return its index
+    pub fn new_ready(&mut self, buffer: Buffer) -> usize {
         let index = self.rules.len();
         self.rules.push(Rule::Ready(buffer.elements));
         index
     }
 
-    fn finish_rule(&mut self, index: usize, buffer: Buffer) {
+    /// Finalize a rule placeholder with its binary format
+    ///
+    /// # Panics
+    ///
+    /// Panics if the rule index is invalid, or the rule is not a placeholder.
+    pub fn finish_rule(&mut self, index: usize, buffer: Buffer) {
         let rule = self
             .rules
             .get_mut(index)
@@ -194,7 +209,8 @@ impl<'source> Compiler<'source> {
         *rule = Rule::Ready(buffer.elements);
     }
 
-    fn get_rule_index(&self, id: Id<'source>) -> Result<usize, Error> {
+    /// Get rule index by its symbol.
+    pub fn get_rule_index(&self, id: Id<'source>) -> Result<usize, Error> {
         self.names
             .get(&id)
             .ok_or_else(|| {

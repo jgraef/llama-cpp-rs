@@ -13,18 +13,47 @@ categories = ["api-bindings", "science", "text-processing"]
 readme = "../README.md"
 license = "MIT"
 
+#### Dependencies
+
 [dependencies]
 tracing = "0.1"
 thiserror = "1.0"
-tokio = { version = "1.33", features = ["rt", "sync", "macros"] }
 num_cpus = "1.16"
-lazy_static = "1.4"
 itertools = "0.11"
 derivative = "2.2"
 futures = "0.3"
 nom = "7.1"
 derive_more = "0.99"
+cfg-if = "1.0"
+
+#### FFI bindings
 
 [dependencies.llama-cpp-sys]
 version = "0.1.0"
 path = "../llama-cpp-sys"
+
+#### Tokio runtime
+
+[dependencies.tokio]
+version = "1.33"
+features = ["rt", "sync", "macros"]
+optional = true
+
+#### async-std runtime
+
+[dependencies.async-std]
+version = "1.12"
+optional = true
+
+[dependencies.async-watch]
+version = "0.3"
+optional = true
+
+
+#### Features
+
+[features]
+# TODO: remove default features, and tell docsrs to build with tokio enabled?
+default = []
+runtime-tokio = ["dep:tokio"]
+runtime-async-std = ["dep:async-std", "dep:async-watch"]

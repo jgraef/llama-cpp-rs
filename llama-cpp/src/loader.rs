@@ -16,12 +16,12 @@
 //! ```
 use std::path::Path;
 
-use tokio::{
-    sync::watch,
-    task::JoinHandle,
-};
-
 use crate::{
+    async_rt::{
+        spawn_blocking,
+        watch,
+        JoinHandle,
+    },
     backend::model::{
         Model,
         ModelParameters,
@@ -42,7 +42,7 @@ impl ModelLoader {
         let path = path.as_ref().to_owned();
 
         // spawn a thread to asynchronously load the model
-        let join_handle = tokio::task::spawn_blocking(move || {
+        let join_handle = spawn_blocking(move || {
             let _guard = tracing::debug_span!("model loader");
             Model::load(path, &parameters, move |progress| {
                 // we don't care about the error, since that just means the receiver has been
@@ -65,9 +65,7 @@ impl ModelLoader {
 
     /// Waits until the model is ready.
     pub async fn wait_for_model(self) -> Result<Model, Error> {
-        self.join_handle
-            .await
-            .expect("model loading thread panicked")
+        self.join_handle.await
     }
 
     /// Wait until some progress is made and return it.
@@ -75,7 +73,7 @@ impl ModelLoader {
     /// This returns `None` if the model finished loading.
     pub async fn wait_for_progress(&mut self) -> Option<f32> {
         match self.progress.changed().await {
-            Ok(()) => Some(*self.progress.borrow_and_update()),
+            Ok(()) => Some(*self.progress.borrow()),
             // the watch channel returns an error iff the sender has been dropped, i.e. the model
             // loading thread finished.
             Err(_) => None,

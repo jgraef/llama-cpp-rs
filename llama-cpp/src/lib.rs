@@ -1,11 +1,17 @@
-//! Idiomatic Rust bindings for [llama.cpp](https://github.com/ggerganov/llama.cpp).
+//! Idiomatic Rust bindings for [llama.cpp][1].
 //!
 //! Low-level synchronous bindings can be found in the [`backend`] module.
 //!
 //! It's recommend to use the high-level asynchronous interfaces found in
 //! [`loader`] and [`session`].
 //!
-//! Todo: support tokio and async-std
+//! # Async Runtime
+//!
+//! Both [Tokio][2] and [async-std][3] are supported. You choose which one is
+//! used by enabling one of the following features:
+//!
+//!  - `runtime-async-std`
+//!  - `runtime-tokio`
 //!
 //! # Example
 //!
@@ -28,7 +34,7 @@
 //!
 //! // create a session and feed prompt to it
 //! let mut session = Session::new(model, Default::default());
-//! session.push_text(&prompt, true, false);
+//! session.push_text(prompt, true, false);
 //!
 //! // create a response stream from it
 //! let stream = session.pieces(None, [], false);
@@ -42,7 +48,12 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! [1]: https://github.com/ggerganov/llama.cpp
+//! [2]: https://tokio.rs/
+//! [3]: https://async.rs/
 
+mod async_rt;
 pub mod backend;
 pub mod grammar;
 pub mod loader;

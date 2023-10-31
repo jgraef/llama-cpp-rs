@@ -3,12 +3,13 @@
 use std::path::Path;
 
 use super::{
+    default_n_threads,
     ffi_path,
     llama_init,
     Error,
     FType,
-    DEFAULT_N_THREADS,
 };
+use crate::async_rt::spawn_blocking;
 
 /// Model quantization parameters
 #[derive(Clone, Debug)]
@@ -27,14 +28,14 @@ pub struct QuantizationParameters {
     pub quantize_output_tensor: bool,
 
     /// Only copy tensors. `ftype`, `allow_requantize` and
-    /// quantize_output_tensor are ignored.
+    /// `quantize_output_tensor`` are ignored.
     pub only_copy: bool,
 }
 
 impl QuantizationParameters {
     pub fn to_ffi(&self) -> llama_cpp_sys::llama_model_quantize_params {
         llama_cpp_sys::llama_model_quantize_params {
-            nthread: self.n_threads.unwrap_or(*DEFAULT_N_THREADS) as i32,
+            nthread: self.n_threads.unwrap_or(default_n_threads()) as i32,
             ftype: self.ftype.to_ffi(),
             allow_requantize: self.allow_requantize,
             quantize_output_tensor: self.quantize_output_tensor,
@@ -66,7 +67,7 @@ pub async fn quantize(
     let output = ffi_path(output)?;
     let params = parameters.to_ffi();
 
-    let result = tokio::task::spawn_blocking(move || {
+    let result = spawn_blocking(move || {
         unsafe {
             llama_cpp_sys::llama_model_quantize(
                 input.as_ptr(),
@@ -75,9 +76,7 @@ pub async fn quantize(
             )
         }
     })
-    .await
-    .ok()
-    .unwrap_or_default();
+    .await;
 
     if result == 0 {
         return Ok(());

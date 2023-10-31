@@ -1,7 +1,11 @@
 //! Large Language Model
 
 use std::{
-    ffi::c_void,
+    ffi::{
+        c_void,
+        CStr,
+        CString,
+    },
     path::{
         Path,
         PathBuf,
@@ -19,6 +23,7 @@ use super::{
     llama_init,
     Error,
     Token,
+    TokenType,
     VocabType,
     MAX_DEVICES,
 };
@@ -231,27 +236,55 @@ impl Model {
         token_buf
     }
 
-    pub fn token_to_piece(&self, token: Token, output: &mut Vec<u8>) {
-        const BUF_SIZE: usize = 32;
-        let mut buf = [0u8; BUF_SIZE];
+    /// Writes the token bytes into an output buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the token is not in the vocabulary.
+    pub fn get_token_text(&self, token: Token, output: &mut Vec<u8>) {
+        assert!(token >= 0 && token < self.n_vocab() as _, "invalid token");
 
-        let num_chars = unsafe {
-            llama_cpp_sys::llama_token_to_piece(
+        let text = unsafe {
+            CStr::from_ptr(llama_cpp_sys::llama_token_get_text(
                 self.inner.handle,
                 token,
-                buf.as_mut_ptr() as _,
-                BUF_SIZE as _,
-            )
-        } as usize;
+            ))
+        };
 
-        tracing::trace!(piece = ?buf, num_chars);
+        tracing::trace!(?text, "get_token_text");
+        output.extend_from_slice(text.to_bytes());
+    }
 
-        assert!(num_chars <= BUF_SIZE);
-        output.extend_from_slice(&buf[..num_chars]);
+    pub fn get_token_score(&self, token: Token) -> f32 {
+        assert!(token >= 0 && token < self.n_vocab() as _, "invalid token");
+
+        unsafe { llama_cpp_sys::llama_token_get_score(self.inner.handle, token) }
+    }
+
+    pub fn get_token_type(&self, token: Token) -> TokenType {
+        assert!(token >= 0 && token < self.n_vocab() as _, "invalid token");
+
+        let ty = unsafe { llama_cpp_sys::llama_token_get_type(self.inner.handle, token) };
+
+        TokenType::from_ffi(ty)
     }
 
     pub fn token_decoder(&self) -> TokenDecoder {
         TokenDecoder::new(self.clone())
+    }
+
+    pub fn get_tensor<'a>(&'a self, name: &str) -> Option<&'a Tensor> {
+        let name = CString::new(name).expect("tensor name contains a null byte");
+
+        unsafe {
+            let tensor = llama_cpp_sys::llama_get_model_tensor(self.inner.handle, name.as_ptr());
+            if tensor.is_null() {
+                None
+            }
+            else {
+                Some(&*tensor)
+            }
+        }
     }
 }
 
@@ -276,7 +309,7 @@ impl TokenDecoder {
     }
 
     pub fn push_token(&mut self, token: Token) {
-        self.model.token_to_piece(token, &mut self.buf);
+        self.model.get_token_text(token, &mut self.buf);
     }
 
     /// Returns the internal buffer as `String`. This returns `None` if the
@@ -319,3 +352,6 @@ impl TokenDecoder {
         Some(s)
     }
 }
+
+/// A GGML tensor.
+pub type Tensor = llama_cpp_sys::ggml_tensor;

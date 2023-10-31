@@ -63,12 +63,13 @@ use futures::{
     pin_mut,
     stream::Stream,
 };
-use tokio::sync::{
-    mpsc,
-    oneshot,
-};
 
 use crate::{
+    async_rt::{
+        mpsc,
+        oneshot,
+        spawn_blocking,
+    },
     backend::{
         context::ContextParameters,
         inference::Inference,
@@ -134,7 +135,7 @@ impl SessionParameters {
 /// Inference session
 pub struct Session {
     model: Model,
-    tx: mpsc::UnboundedSender<Command>,
+    tx: mpsc::unbounded::Sender<Command>,
 }
 
 impl Session {
@@ -146,10 +147,10 @@ impl Session {
     pub fn new(model: Model, session_parameters: SessionParameters) -> Self {
         session_parameters.check().unwrap();
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded::channel();
 
         // spawn thread that runs the sync llama code
-        tokio::task::spawn_blocking({
+        spawn_blocking({
             let model = model.clone();
             move || session_thread(model, session_parameters, rx)
         });
@@ -184,7 +185,8 @@ impl Session {
         stop_tokens: impl IntoIterator<Item = Token>,
         lock_step: bool,
     ) -> TokenStream<'session> {
-        let (tx, rx) = mpsc::channel(max_tokens.unwrap_or(TokenStream::DEFAULT_CHANNEL_SIZE));
+        let (tx, rx) =
+            mpsc::bounded::channel(max_tokens.unwrap_or(TokenStream::DEFAULT_CHANNEL_SIZE));
 
         self.send_command(Command::Sample {
             max_tokens,
@@ -218,7 +220,7 @@ impl Session {
 fn session_thread(
     model: Model,
     parameters: SessionParameters,
-    mut rx: mpsc::UnboundedReceiver<Command>,
+    mut rx: mpsc::unbounded::Receiver<Command>,
 ) {
     let _span = tracing::debug_span!("session thread started");
     tracing::debug!("model: {}", model.path().display());
@@ -231,7 +233,7 @@ fn session_thread(
     let mut inference = Inference::new(&mut context, batch_size);
     let mut sampler = Sampler::new(parameters.sampling);
 
-    while let Some(command) = rx.blocking_recv() {
+    while let Some(command) = rx.blocking_receive() {
         let result = (|| {
             match command {
                 Command::Push { tokens } => {
@@ -300,7 +302,7 @@ fn session_thread(
                         if lock_step {
                             let rx = rx_continue
                                 .expect("sampling in lock-step mode, but rx_continue is None");
-                            match rx.blocking_recv() {
+                            match rx.blocking_receive() {
                                 Ok(ShouldContinue::Stop) => {
                                     // the user terminated the stream. we don't need to send the
                                     // stop reason.
@@ -347,7 +349,7 @@ enum Command {
     Sample {
         max_tokens: Option<usize>,
         stop_tokens: HashSet<Token>,
-        tx: mpsc::Sender<SampleStreamItem>,
+        tx: mpsc::bounded::Sender<SampleStreamItem>,
         lock_step: bool,
     },
 }
@@ -371,6 +373,7 @@ enum ShouldContinue {
     Stop,
 }
 
+#[derive(Debug)]
 enum SampleStreamItem {
     Stop {
         reason: StopReason,
@@ -384,7 +387,7 @@ enum SampleStreamItem {
 
 /// Streams individual tokens from a LLM.
 pub struct TokenStream<'session> {
-    rx: Option<mpsc::Receiver<SampleStreamItem>>,
+    rx: Option<mpsc::bounded::Receiver<SampleStreamItem>>,
 
     /// # Note
     ///
@@ -452,7 +455,7 @@ impl<'session> TokenStream<'session> {
         // note: once we close the stream, there should be no outstanding senders or
         // permits.
         let mut leftover = vec![];
-        while let Ok(item) = rx.try_recv() {
+        while let Ok(item) = rx.try_receive() {
             match item {
                 SampleStreamItem::Stop { reason: _ } => {
                     // the stream was also terminated by the session thread. we
@@ -514,7 +517,8 @@ impl<'session> Stream for TokenStream<'session> {
         self.proceed();
 
         if let Some(rx) = &mut self.rx {
-            rx.poll_recv(cx).map(|item_opt| {
+            pin_mut!(rx);
+            rx.poll_next(cx).map(|item_opt| {
                 match item_opt {
                     Some(SampleStreamItem::Token { token, tx_continue }) => {
                         self.tx_continue = tx_continue;

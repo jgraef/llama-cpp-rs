@@ -30,9 +30,10 @@ Both [Tokio][2] and [async-std][3] are supported. You choose which one is used b
  - [ ] GPU support
  - [ ] LORA
  - [x] grammar sampling
- - [ ] repetition penalties
+ - [x] repetition penalties
  - [ ] beam search
  - [ ] classifier free guidance
+ - [ ] logit bias
  - [x] tokio runtime
  - [x] async-std runtime
 

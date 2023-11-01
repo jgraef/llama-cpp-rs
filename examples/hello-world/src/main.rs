@@ -42,7 +42,7 @@ async fn main() -> Result<(), Error> {
     let mut inference = model.inference(Default::default());
 
     // feed prompt to it.
-    inference.push_text(&prompt, true, false);
+    inference.push_text(&prompt, true, false).await?;
 
     // create a response stream from it
     let stream = inference.pieces(None, [], false);

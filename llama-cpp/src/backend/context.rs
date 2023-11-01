@@ -8,10 +8,7 @@ use super::{
     batch::Batch,
     default_n_threads,
     model::Model,
-    sampling::{
-        Candidates,
-        Sampler,
-    },
+    sampling::{Sampler, Candidates},
     Error,
     Pos,
     Token,
@@ -411,11 +408,11 @@ impl<'a> Decoder<'a> {
             .expect("sample was called before a prompt was feed into inference");
         let logits = self.context.get_logits_ith(logits_pos);
 
-        // create candidates from logits
-        let mut candidates = Candidates::new(logits);
-
         // sample next token
-        let next_token = sampler.sample(&mut candidates, &mut self.context);
+        let candidates = Candidates::from_logits(logits);
+        let next_token = sampler.sample(candidates, &mut self.context);
+
+        sampler.push_previous(next_token);
 
         // clear batch to feed in sampled token
         self.batch.clear();

@@ -267,118 +267,111 @@ fn inference_thread(
     let mut sampler = Sampler::new(parameters.sampling);
 
     while let Some(command) = rx.blocking_receive() {
-        let result = (|| {
-            match command {
-                Command::Push { tokens, tx_result } => {
-                    // feed the prompt tokens in case the sampler needs them.
-                    for token in &tokens {
-                        sampler.feed_prompt_token(*token);
+        match command {
+            Command::Push { tokens, tx_result } => {
+                // note: we already checked that the tokens are valid in
+                // `Inference::push_tokens`.
+
+                // feed the prompt tokens in case the sampler needs them.
+                for token in &tokens {
+                    sampler.push_previous(*token);
+                }
+
+                // feed the prompt into inference.
+                let result = unsafe { decoder.decode_unchecked(&tokens, true) };
+                tx_result.send(result.map_err(Into::into)).ok();
+            }
+            Command::ResetSampler { parameters } => {
+                let parameters = parameters.unwrap_or_else(|| sampler.parameters().clone());
+                sampler = Sampler::new(parameters);
+            }
+            Command::Sample {
+                max_tokens,
+                stop_tokens,
+                tx,
+                lock_step,
+            } => {
+                let mut i: usize = 0;
+
+                loop {
+                    let sampled = match decoder.sample_and_decode(&mut sampler) {
+                        Ok(sampled) => sampled,
+                        Err(e) => {
+                            // an error occured.
+                            tx.blocking_send(SampleStreamItem::Error(e)).ok();
+                            break;
+                        }
+                    };
+
+                    if let Some(warning) = sampled.warning {
+                        // send warning to stream
+                        tx.blocking_send(SampleStreamItem::Warning(warning)).ok();
                     }
 
-                    // feed the prompt into inference.
-                    // todo: send this error back to the caller. then the session thread doesn't
-                    // produce any errors that it doesn't handle. so we can remove the try-catch.
-                    // note: we check for valid tokens in `Inference::push_tokens`.
-                    let result = unsafe { decoder.decode_unchecked(&tokens, true) };
-                    tx_result.send(result.map_err(Into::into)).ok();
-                }
-                Command::ResetSampler { parameters } => {
-                    let parameters = parameters.unwrap_or_else(|| sampler.parameters().clone());
-                    sampler = Sampler::new(parameters);
-                }
-                Command::Sample {
-                    max_tokens,
-                    stop_tokens,
-                    tx,
-                    lock_step,
-                } => {
-                    let mut i: usize = 0;
+                    // eos, so we stop
+                    if sampled.token == model.token_eos() {
+                        break;
+                    }
 
-                    loop {
-                        let sampled = match decoder.sample_and_decode(&mut sampler) {
-                            Ok(sampled) => sampled,
-                            Err(e) => {
-                                // an error occured.
-                                tx.blocking_send(SampleStreamItem::Error(e)).ok();
+                    let token = sampled.token;
+
+                    // if we found a stop token, we stop.
+                    if stop_tokens.contains(&token) {
+                        tx.blocking_send(SampleStreamItem::Stop {
+                            reason: StopReason::StopToken(token),
+                        })
+                        .ok();
+                        break;
+                    }
+
+                    // create tx_continue if we run in lock-step mode
+                    let (tx_continue, rx_continue) = if lock_step {
+                        let (rx, tx) = oneshot::channel();
+                        (Some(rx), Some(tx))
+                    }
+                    else {
+                        (None, None)
+                    };
+
+                    // send the token to the token stream
+                    if tx
+                        .blocking_send(SampleStreamItem::Token { token, tx_continue })
+                        .is_err()
+                    {
+                        // the receiver was dropped, so we're done here.
+                        break;
+                    }
+
+                    // if we're in lock-step mode we wait for the ShouldContinue to arrive.
+                    if lock_step {
+                        let rx = rx_continue
+                            .expect("sampling in lock-step mode, but rx_continue is None");
+                        match rx.blocking_receive() {
+                            Ok(ShouldContinue::Stop) => {
+                                // the user terminated the stream. we don't need to send the
+                                // stop reason.
                                 break;
                             }
-                        };
-
-                        if let Some(warning) = sampled.warning {
-                            // send warning to stream
-                            tx.blocking_send(SampleStreamItem::Warning(warning)).ok();
+                            // if ShouldContinue::Continue => we continue
+                            // if Err, the tx_continue was dropped. that means we don't want to
+                            // stop either.
+                            _ => {}
                         }
+                    }
 
-                        // eos, so we stop
-                        if sampled.token == model.token_eos() {
-                            break;
-                        }
+                    // increment token count
+                    i += 1;
 
-                        let token = sampled.token;
-
-                        // if we found a stop token, we stop.
-                        if stop_tokens.contains(&token) {
-                            tx.blocking_send(SampleStreamItem::Stop {
-                                reason: StopReason::StopToken(token),
-                            })
-                            .ok();
-                            break;
-                        }
-
-                        // create tx_continue if we run in lock-step mode
-                        let (tx_continue, rx_continue) = if lock_step {
-                            let (rx, tx) = oneshot::channel();
-                            (Some(rx), Some(tx))
-                        }
-                        else {
-                            (None, None)
-                        };
-
-                        // send the token to the token stream
-                        if tx
-                            .blocking_send(SampleStreamItem::Token { token, tx_continue })
-                            .is_err()
-                        {
-                            // the receiver was dropped, so we're done here.
-                            break;
-                        }
-
-                        // if we're in lock-step mode we wait for the ShouldContinue to arrive.
-                        if lock_step {
-                            let rx = rx_continue
-                                .expect("sampling in lock-step mode, but rx_continue is None");
-                            match rx.blocking_receive() {
-                                Ok(ShouldContinue::Stop) => {
-                                    // the user terminated the stream. we don't need to send the
-                                    // stop reason.
-                                    break;
-                                }
-                                // if ShouldContinue::Continue => we continue
-                                // if Err, the tx_continue was dropped. that means we don't want to
-                                // stop either.
-                                _ => {}
-                            }
-                        }
-
-                        // increment token count
-                        i += 1;
-
-                        // if max_tokens is not None and we reached it, we stop.
-                        if max_tokens.map(|m| i >= m).unwrap_or_default() {
-                            tx.blocking_send(SampleStreamItem::Stop {
-                                reason: StopReason::MaxTokens(i),
-                            })
-                            .ok();
-                            break;
-                        }
+                    // if max_tokens is not None and we reached it, we stop.
+                    if max_tokens.map(|m| i >= m).unwrap_or_default() {
+                        tx.blocking_send(SampleStreamItem::Stop {
+                            reason: StopReason::MaxTokens(i),
+                        })
+                        .ok();
+                        break;
                     }
                 }
             }
-            Ok::<(), Error>(())
-        })();
-
-        if let Err(e) = result {
-            tracing::error!("session thread error: {e}");
         }
     }
 }

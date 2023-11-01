@@ -146,6 +146,40 @@ impl Buffer {
             self.tokens.pop_front();
         }
     }
+
+    pub fn get_last_n(&mut self, mut last_n: usize) -> &[Token] {
+        let n = self.tokens.len();
+
+        // take at most as many tokens as we have.
+        if last_n > n {
+            last_n = n;
+        }
+
+        if last_n == 0 {
+            return &[];
+        }
+
+        let start = n - last_n;
+        let end = n;
+
+        let (a, _) = self.tokens.as_slices();
+
+        if start < a.len() && end <= a.len() {
+            // all elements are in the first half of the buffer
+            let (a, _) = self.tokens.as_slices();
+            &a[start..end]
+        }
+        else if start >= a.len() && end >= a.len() {
+            // all elements are in the second half of the buffer
+            let (a, b) = self.tokens.as_slices();
+            &b[start - a.len()..end - a.len()]
+        }
+        else {
+            // we need to make the buffer contiguous
+            let c = self.tokens.make_contiguous();
+            &c[start..end]
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -199,19 +233,51 @@ impl Sampler {
     }
 
     /// Sample a token from the candidates.
-    pub fn sample(&mut self, candidates: &mut Candidates, context: &mut Context) -> Token {
-        let candidates = &mut candidates.data as *mut _;
+    pub fn sample(&mut self, mut candidates: Candidates, context: &mut Context) -> Token {
+        let token_data = &mut candidates.data as *mut _;
 
         // apply repetition penalties
-        if let Some(_repetition_penalties) = &self.parameters.repetition_penalties {
-            todo!("implement repetition penalties");
+        // note: we don't care if the previous token buffer has invalid tokens in it.
+        // the llama.cpp function called here doesn't care. it just counts occurences.
+        if let Some(repetition_penalties) = &self.parameters.repetition_penalties {
+            let buffer = self.token_buf.as_mut().expect("no token buffer");
+            let last_tokens = buffer.get_last_n(repetition_penalties.last_n);
+
+            // get newline index and logit to reset later
+            let nl = context.model().token_nl();
+            let nl = (!repetition_penalties.penalize_nl)
+                .then(|| {
+                    candidates
+                        .buf
+                        .iter()
+                        .enumerate()
+                        .find_map(|(i, c)| (c.id == nl).then_some((i, c.logit)))
+                })
+                .flatten();
+
+            unsafe {
+                llama_cpp_sys::llama_sample_repetition_penalties(
+                    context.handle,
+                    token_data,
+                    last_tokens.as_ptr(),
+                    last_tokens.len(),
+                    repetition_penalties.repeat.unwrap_or(1.0),
+                    repetition_penalties.frequency.unwrap_or_default(),
+                    repetition_penalties.present.unwrap_or_default(),
+                );
+            }
+
+            // reset newline logit
+            if let Some((i, logit)) = nl {
+                candidates.buf[i].logit = logit;
+            }
         }
 
         // note: grammar sampling doesn't work if this is done in another order! if
         // something breaks, check the llama.cpp sampling code.
         if let Some(grammar) = &self.grammar {
             unsafe {
-                llama_cpp_sys::llama_sample_grammar(context.handle, candidates, grammar.handle);
+                llama_cpp_sys::llama_sample_grammar(context.handle, token_data, grammar.handle);
             }
         }
 
@@ -224,11 +290,11 @@ impl Sampler {
                     m,
                     temperature,
                 } => {
-                    llama_cpp_sys::llama_sample_temp(context.handle, candidates, temperature);
+                    llama_cpp_sys::llama_sample_temp(context.handle, token_data, temperature);
 
                     llama_cpp_sys::llama_sample_token_mirostat(
                         context.handle,
-                        candidates,
+                        token_data,
                         tau,
                         eta,
                         m,
@@ -241,11 +307,11 @@ impl Sampler {
                     eta,
                     temperature,
                 } => {
-                    llama_cpp_sys::llama_sample_temp(context.handle, candidates, temperature);
+                    llama_cpp_sys::llama_sample_temp(context.handle, token_data, temperature);
 
                     llama_cpp_sys::llama_sample_token_mirostat_v2(
                         context.handle,
-                        candidates,
+                        token_data,
                         tau,
                         eta,
                         &mut self.mu as _,
@@ -253,7 +319,7 @@ impl Sampler {
                 }
 
                 SamplingMode::Greedy => {
-                    llama_cpp_sys::llama_sample_token_greedy(context.handle, candidates)
+                    llama_cpp_sys::llama_sample_token_greedy(context.handle, token_data)
                 }
 
                 SamplingMode::Temperature {
@@ -266,38 +332,37 @@ impl Sampler {
                 } => {
                     let min_keep = std::cmp::min(1, n_probs);
 
-                    llama_cpp_sys::llama_sample_temp(context.handle, candidates, temperature);
+                    llama_cpp_sys::llama_sample_temp(context.handle, token_data, temperature);
 
-                    llama_cpp_sys::llama_sample_top_k(context.handle, candidates, top_k, min_keep);
+                    llama_cpp_sys::llama_sample_top_k(context.handle, token_data, top_k, min_keep);
 
                     llama_cpp_sys::llama_sample_tail_free(
                         context.handle,
-                        candidates,
+                        token_data,
                         tfs_z,
                         min_keep,
                     );
 
                     llama_cpp_sys::llama_sample_typical(
                         context.handle,
-                        candidates,
+                        token_data,
                         typical_p,
                         min_keep,
                     );
 
-                    llama_cpp_sys::llama_sample_top_p(context.handle, candidates, top_p, min_keep);
+                    llama_cpp_sys::llama_sample_top_p(context.handle, token_data, top_p, min_keep);
 
-                    llama_cpp_sys::llama_sample_token(context.handle, candidates)
+                    llama_cpp_sys::llama_sample_token(context.handle, token_data)
                 }
             }
         };
 
         // feed token into previous token accumulator
-        self.feed_previous(token);
+        self.push_previous(token);
 
         // feed token into grammar
         //
-        // It's very important that we only feed tokens to the grammar that were just
-        // sampled using the grammar.
+        // It's very important that we only feed tokens to the grammar that can be accepted by it.
         if let Some(grammar) = &mut self.grammar {
             // see safety section in [`Grammar::accept_token`].
             unsafe {
@@ -308,37 +373,36 @@ impl Sampler {
         token
     }
 
-    fn feed_previous(&mut self, token: Token) {
+    /// Push a token into the previous token buffer.
+    pub fn push_previous(&mut self, token: Token) {
         if let Some(token_buf) = &mut self.token_buf {
             token_buf.push(token);
         }
     }
-
-    pub fn feed_prompt_token(&mut self, token: Token) {
-        // todo: is this unsafe, since we can feed invalid tokens?
-        self.feed_previous(token);
-    }
 }
 
-// is this a good way to do this?
+#[derive(Clone, Debug)]
 pub struct Candidates {
-    _buf: Pin<Vec<llama_cpp_sys::llama_token_data>>,
-
-    // this references `_buf`, so we need to make sure it can only be accessed while `_buf` still
-    // exists.
+    buf: Pin<Vec<llama_cpp_sys::llama_token_data>>,
     data: llama_cpp_sys::llama_token_data_array,
 }
 
 impl Candidates {
-    pub fn new(logits: &[f32]) -> Self {
+    pub fn from_logits(logits: &[f32]) -> Self {
         let mut buf = Vec::with_capacity(logits.len());
+
         for (i, logit) in logits.iter().enumerate() {
+            let token = i as Token;
+
             buf.push(llama_cpp_sys::llama_token_data {
-                id: i as _,
+                id: token,
                 logit: *logit,
                 p: 0.0,
             });
         }
+
+        // pin it before we get the pointer to it.
+        let mut buf = Pin::new(buf);
 
         let data = llama_cpp_sys::llama_token_data_array {
             data: buf.as_mut_ptr(),
@@ -346,9 +410,6 @@ impl Candidates {
             sorted: false,
         };
 
-        Self {
-            _buf: Pin::new(buf),
-            data,
-        }
+        Self { buf, data }
     }
 }

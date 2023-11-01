@@ -23,7 +23,7 @@ pub mod test {
     use std::cell::OnceCell;
 
     use crate::backend::{
-        context::Context,
+        context::{Context, ContextParameters},
         model::Model,
     };
 
@@ -40,6 +40,9 @@ pub mod test {
     }
 
     pub fn context() -> Context {
-        model().context(&Default::default())
+        model().context(&ContextParameters {
+            seed: Some(1234),
+            ..Default::default()
+        })
     }
 }

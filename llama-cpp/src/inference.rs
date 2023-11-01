@@ -7,19 +7,19 @@
 //!
 //! ```
 //! # use std::io::{stdout, Write};
-//! # use llama_cpp::{loader::ModelLoader, session::Session, Error};
+//! # use llama_cpp::{loader::ModelLoader, Error};
 //! # use futures::{stream::TryStreamExt, pin_mut};
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Error> {
 //! # let model = ModelLoader::load("../data/TinyLLama-v0.gguf", Default::default()).wait_for_model().await?;
 //! // first create an inference session.
-//! let mut session = Session::new(model, Default::default());
+//! let mut inference = model.inference(Default::default());
 //!
 //! // push your prompt into it.
-//! session.push_text("Write a poem.", true, false);
+//! inference.push_text("Write a poem.", true, false).await?;
 //!
 //! // get a stream of word pieces.
-//! let stream = session.pieces(None, [], false);
+//! let stream = inference.pieces(None, [], false);
 //! pin_mut!(stream);
 //!
 //! // stream LLM output piece by piece
@@ -34,8 +34,8 @@
 //! # Lock-step mode
 //!
 //! The [`TokenStream`] and [`PieceStream`] can be run in lock-step mode. To
-//! enable this pass `lock_step = true` to [`Session::tokens`] or
-//! [`Session::pieces`].
+//! enable this pass `lock_step = true` to [`Inference::tokens`] or
+//! [`Inference::pieces`].
 //!
 //! In lock-step mode the background thread will wait with sampling the next
 //! token until the the stream is polled for the next item. This ensures you
@@ -53,7 +53,10 @@
 use std::{
     collections::HashSet,
     pin::Pin,
-    task::{self, Poll},
+    task::{
+        self,
+        Poll,
+    },
 };
 
 use futures::{
@@ -69,10 +72,11 @@ use crate::{
     },
     backend::{
         context::{
+            Context,
             ContextParameters,
-            DecodeWarning, Context,
+            DecodeWarning,
+            Decoder,
         },
-        inference::Inference,
         model::{
             Model,
             TokenDecoder,
@@ -86,7 +90,7 @@ use crate::{
     Error,
 };
 
-/// The [`SessionParameters`] are invalid.
+/// The [`InferenceParameters`] are invalid.
 #[derive(Debug, thiserror::Error)]
 pub enum CheckError {
     #[error("invalid context parameters")]
@@ -101,7 +105,7 @@ pub enum CheckError {
 
 /// Session parameters
 #[derive(Clone, Debug, Default)]
-pub struct SessionParameters {
+pub struct InferenceParameters {
     /// Parameters to create the llama context.
     pub context: ContextParameters,
 
@@ -114,7 +118,7 @@ pub struct SessionParameters {
     pub batch_size: Option<usize>,
 }
 
-impl SessionParameters {
+impl InferenceParameters {
     /// Checks if the session parameters are valid
     pub fn check(&self) -> Result<(), CheckError> {
         self.context.check()?;
@@ -134,26 +138,26 @@ impl SessionParameters {
 }
 
 /// Inference session
-pub struct Session {
+pub struct Inference {
     model: Model,
     tx: mpsc::unbounded::Sender<Command>,
 }
 
-impl Session {
+impl Inference {
     /// Creates a new inference session.
     ///
     /// # Panics
     ///
-    /// Panics if the session parameters are invalid.
-    pub fn new(model: Model, session_parameters: SessionParameters) -> Self {
-        session_parameters.check().unwrap();
+    /// Panics if the inference parameters are invalid.
+    pub fn new(model: Model, parameters: InferenceParameters) -> Self {
+        parameters.check().unwrap();
 
         let (tx, rx) = mpsc::unbounded::channel();
 
         // spawn thread that runs the sync llama code
         spawn_blocking({
             let model = model.clone();
-            move || session_thread(model, session_parameters, rx)
+            move || inference_thread(model, parameters, rx)
         });
 
         Self { model, tx }
@@ -166,21 +170,44 @@ impl Session {
         self.tx.send(command).expect("session thread terminated")
     }
 
-    /// Push tokens (your prompt) into the LLM.
-    pub fn push_tokens(&self, tokens: Vec<Token>) {
-        // todo: pass oneshot to get error back,
-        // todo: do we need to check if the tokens are valid?
-        self.send_command(Command::Push { tokens });
+    async fn push_tokens_unchecked(&self, tokens: Vec<Token>) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::Push {
+            tokens,
+            tx_result: tx,
+        });
+        rx.await.expect("session thread dropped result sender")
     }
 
-    /// Tokenize the text (your prompt) and push it into the LLM.
-    pub fn push_text(&self, text: &str, add_bos: bool, allow_special: bool) {
+    /// Push tokens (e.g. your prompt) into the LLM.
+    pub async fn push_tokens(&self, tokens: Vec<Token>) -> Result<(), Error> {
+        // check tokens
+        for token in &tokens {
+            self.model.assert_valid_token(*token);
+        }
+
+        self.push_tokens_unchecked(tokens).await
+    }
+
+    /// Tokenize the text (e.g. your prompt) and push it into the LLM.
+    pub async fn push_text(
+        &self,
+        text: &str,
+        add_bos: bool,
+        allow_special: bool,
+    ) -> Result<(), Error> {
         let tokens = self.model.tokenize(text, add_bos, allow_special);
-        self.push_tokens(tokens);
+        // since the tokens came from the tokenizer, we can assume they're valid.
+        self.push_tokens_unchecked(tokens).await
     }
 
     /// Reset the sampler and optionally set new sampling parameters.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the [`SamplingParameters`] are invalid.
     pub fn reset_sampler(&self, parameters: Option<SamplingParameters>) {
+        parameters.as_ref().map(|p| p.check().unwrap());
         self.send_command(Command::ResetSampler { parameters })
     }
 
@@ -224,26 +251,25 @@ impl Session {
     }
 }
 
-fn session_thread(
+fn inference_thread(
     model: Model,
-    parameters: SessionParameters,
+    parameters: InferenceParameters,
     mut rx: mpsc::unbounded::Receiver<Command>,
 ) {
     let _span = tracing::debug_span!("session thread started");
-    tracing::debug!("model: {}", model.path().display());
     tracing::trace!(?parameters);
 
     let mut context = Context::new(model.clone(), &parameters.context);
     let batch_size = parameters
         .batch_size
-        .unwrap_or(parameters.context.n_batch as _);
-    let mut inference = Inference::new(&mut context, batch_size);
+        .unwrap_or(parameters.context.n_batch_max as _);
+    let mut decoder = Decoder::new(&mut context, batch_size);
     let mut sampler = Sampler::new(parameters.sampling);
 
     while let Some(command) = rx.blocking_receive() {
         let result = (|| {
             match command {
-                Command::Push { tokens } => {
+                Command::Push { tokens, tx_result } => {
                     // feed the prompt tokens in case the sampler needs them.
                     for token in &tokens {
                         sampler.feed_prompt_token(*token);
@@ -252,7 +278,9 @@ fn session_thread(
                     // feed the prompt into inference.
                     // todo: send this error back to the caller. then the session thread doesn't
                     // produce any errors that it doesn't handle. so we can remove the try-catch.
-                    inference.push(&tokens)?;
+                    // note: we check for valid tokens in `Inference::push_tokens`.
+                    let result = unsafe { decoder.decode_unchecked(&tokens, true) };
+                    tx_result.send(result.map_err(Into::into)).ok();
                 }
                 Command::ResetSampler { parameters } => {
                     let parameters = parameters.unwrap_or_else(|| sampler.parameters().clone());
@@ -267,7 +295,7 @@ fn session_thread(
                     let mut i: usize = 0;
 
                     loop {
-                        let sampled = match inference.sample(&mut sampler) {
+                        let sampled = match decoder.sample_and_decode(&mut sampler) {
                             Ok(sampled) => sampled,
                             Err(e) => {
                                 // an error occured.
@@ -358,7 +386,9 @@ fn session_thread(
 #[derive(Debug)]
 enum Command {
     Push {
+        // these are valid tokens.
         tokens: Vec<Token>,
+        tx_result: oneshot::Sender<Result<(), Error>>,
     },
     ResetSampler {
         parameters: Option<SamplingParameters>,
@@ -411,7 +441,7 @@ pub struct TokenStream<'session> {
     ///
     /// We pass the session, so that the session is exclusively borrowed by this
     /// and thus the user can't start multiple token streams at the same time.
-    _session: &'session mut Session,
+    _session: &'session mut Inference,
 
     /// the stop reason. we either receive this from the session thread, or set
     /// it ourselves.

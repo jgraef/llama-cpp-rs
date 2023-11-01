@@ -6,7 +6,6 @@ authors = ["Janosch Gräf <janosch.graef@gmail.com>"]
 links = "llama"
 description = "llama.cpp FFI bindings for Rust"
 repository = "https://github.com/jgraef/llama-cpp-rs"
-homepage = "https://github.com/jgraef/llama-cpp-rs"
 # todo: add this once it's on docs.rs
 # documentation = ""
 keywords = ["llm", "ai"]

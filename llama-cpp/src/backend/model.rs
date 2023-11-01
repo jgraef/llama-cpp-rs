@@ -6,15 +6,16 @@ use std::{
         CStr,
         CString,
     },
-    path::{
-        Path,
-        PathBuf,
-    },
+    path::Path,
     ptr,
     sync::Arc,
 };
 
 use super::{
+    context::{
+        Context,
+        ContextParameters,
+    },
     ffi_path,
     llama_init,
     Error,
@@ -76,7 +77,7 @@ impl Default for ModelParameters {
 
 pub(super) struct ModelInner {
     pub(super) handle: *mut llama_cpp_sys::llama_model,
-    pub(super) path: PathBuf,
+    n_vocab: i32,
 }
 
 impl Drop for ModelInner {
@@ -93,7 +94,7 @@ impl Drop for ModelInner {
 unsafe impl Send for ModelInner {}
 unsafe impl Sync for ModelInner {}
 
-/// A LLM ready to use.
+/// A large language model
 ///
 /// This internally uses an `Arc`, so it's cheap to clone.
 #[derive(Clone)]
@@ -102,6 +103,9 @@ pub struct Model {
 }
 
 impl Model {
+    /// Loads the model from a file. This method is blocking. If you want to
+    /// load the model asynchronously, use
+    /// [`ModelLoader`](crate::loader::ModelLoader)
     pub fn load<P: FnMut(f32)>(
         path: impl AsRef<Path>,
         parameters: &ModelParameters,
@@ -109,14 +113,13 @@ impl Model {
     ) -> Result<Self, Error> {
         llama_init();
 
-        let path = path.as_ref().to_owned();
-
+        let path = path.as_ref();
         tracing::debug!("loading model: {}", path.display());
 
         // we pass a pointer to the Box rather than the boxes pointer itself, so that we
         // definitely clean up its memory when it's dropped.
         let progress_callback_user_data = &mut progress as *mut _ as *mut c_void;
-        let c_path = ffi_path(&path)?;
+        let c_path = ffi_path(path)?;
 
         unsafe extern "C" fn progress_callback<P: FnMut(f32)>(
             progress: f32,
@@ -134,18 +137,28 @@ impl Model {
 
         if handle.is_null() {
             tracing::debug!("llama_load_model_from file returned NULL");
-            Err(Error::ModelLoadFailed { path })
+            Err(Error::ModelLoadFailed {
+                path: path.to_owned(),
+            })
         }
         else {
             tracing::debug!("model loaded");
+
+            let n_vocab = unsafe { llama_cpp_sys::llama_n_vocab(handle) };
+
             Ok(Model {
-                inner: Arc::new(ModelInner { handle, path }),
+                inner: Arc::new(ModelInner { handle, n_vocab }),
             })
         }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.inner.path
+    /// Creates a new context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the context parameters are invalid.
+    pub fn context(&self, context_parameters: &ContextParameters) -> Context {
+        Context::new(self.clone(), context_parameters)
     }
 
     pub fn vocab_type(&self) -> VocabType {
@@ -153,7 +166,7 @@ impl Model {
     }
 
     pub fn n_vocab(&self) -> u32 {
-        unsafe { llama_cpp_sys::llama_n_vocab(self.inner.handle) as u32 }
+        self.inner.n_vocab as _
     }
 
     pub fn n_ctx_train(&self) -> u32 {
@@ -234,7 +247,7 @@ impl Model {
     ///
     /// Panics if the token is not in the vocabulary.
     pub fn get_token_text(&self, token: Token, output: &mut Vec<u8>) {
-        assert!(token >= 0 && token < self.n_vocab() as _, "invalid token");
+        self.assert_valid_token(token);
 
         let text = unsafe {
             CStr::from_ptr(llama_cpp_sys::llama_token_get_text(
@@ -248,19 +261,20 @@ impl Model {
     }
 
     pub fn get_token_score(&self, token: Token) -> f32 {
-        assert!(token >= 0 && token < self.n_vocab() as _, "invalid token");
+        self.assert_valid_token(token);
 
         unsafe { llama_cpp_sys::llama_token_get_score(self.inner.handle, token) }
     }
 
     pub fn get_token_type(&self, token: Token) -> TokenType {
-        assert!(token >= 0 && token < self.n_vocab() as _, "invalid token");
+        self.assert_valid_token(token);
 
         let ty = unsafe { llama_cpp_sys::llama_token_get_type(self.inner.handle, token) };
 
         TokenType::from_ffi(ty)
     }
 
+    /// Creates a new token decoder.
     pub fn token_decoder(&self) -> TokenDecoder {
         TokenDecoder::new(self.clone())
     }
@@ -277,6 +291,31 @@ impl Model {
                 Some(&*tensor)
             }
         }
+    }
+
+    pub(crate) fn assert_valid_token(&self, token: Token) {
+        if !self.is_valid_token(token) {
+            panic!("invalid token: {token}");
+        }
+    }
+
+    /// Returns if the token is valid for this model.
+    pub fn is_valid_token(&self, token: Token) -> bool {
+        token >= 0 && token < self.inner.n_vocab
+    }
+
+    /// Creates a new inference session.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the inference parameters are invalid.
+    #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+    #[cfg(feature = "async")]
+    pub fn inference(
+        &self,
+        parameters: crate::inference::InferenceParameters,
+    ) -> crate::inference::Inference {
+        crate::inference::Inference::new(self.clone(), parameters)
     }
 }
 

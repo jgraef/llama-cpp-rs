@@ -17,3 +17,29 @@ impl<I: Iterator> Iterator for IsLast<I> {
         Some((item, is_last))
     }
 }
+
+#[cfg(test)]
+pub mod test {
+    use std::cell::OnceCell;
+
+    use crate::backend::{
+        context::Context,
+        model::Model,
+    };
+
+    const MODEL: OnceCell<Model> = OnceCell::new();
+
+    // we can share the model between tests
+    pub fn model() -> Model {
+        MODEL
+            .get_or_init(|| {
+                Model::load("../data/TinyLLama-v0.gguf", &Default::default(), |_| {})
+                    .expect("failed to load model")
+            })
+            .clone()
+    }
+
+    pub fn context() -> Context {
+        model().context(&Default::default())
+    }
+}

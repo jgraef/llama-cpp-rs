@@ -4,11 +4,75 @@
 //! here is synchronous, meaning it can't be awaited and will block the current
 //! thread. Since LLM inference is a slow process, it's recommended to use the
 //! high-level interface, which runs the synchronous code in a separate thread.
+//!
+//! # Example
+//!
+//! ```
+//! # use std::io::{stdout, Write};
+//! # use llama_cpp::{backend::{model::Model, context::{Context, Decoder}, sampling::Sampler}, Error};
+//! # fn main() -> Result<(), Error> {
+//! # let model_path = "../data/TinyLLama-v0.gguf";
+//! // load model (with default model parameters)
+//! let model = Model::load(
+//!     model_path,
+//!     &Default::default(),
+//!     |progress| println!("progress: {} %", progress * 100.0)
+//! )?;
+//!
+//! // create context (with default context parameters)
+//! let mut context = model.context(&Default::default());
+//!
+//! // create batched decoder (with batch size 512)
+//! let mut decoder = context.decoder(512);
+//!
+//! // prompt
+//! let prompt = "The capital of France is";
+//! print!("{prompt}");
+//! stdout().flush()?;
+//!
+//! // tokenize and decode prompt
+//! let tokens = model.tokenize(prompt, true, false);
+//! decoder.decode(&tokens, true);
+//!
+//! // create sampler
+//! let mut sampler = Sampler::new(Default::default());
+//!
+//! let mut token_decoder = model.token_decoder();
+//! loop {
+//!     // sample and decode the sampled token
+//!     let token = decoder.sample_and_decode(&mut sampler)?.token;
+//!
+//!     // if it's an eos token, we are done.
+//!     if token == model.token_eos() {
+//!         break;
+//!     }
+//!
+//!     // decode token
+//!     token_decoder.push_token(token);
+//!     if let Some(text) = token_decoder.pop_string() {
+//!         print!("{text}");
+//!         stdout().flush()?;
+//!     }
+//! }
+//!
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Safety
+//!
+//! We tried to make sure all the public interfaces in this module are safe to
+//! use and don't cause crashes or undefined behaviour, but we might have missed
+//! a few edge-cases. If you encounter a crash, please [open an issue][1].
+//!
+//! Some functions in here are unsafe, because they assume specific invariants,
+//! e.g. that tokens are valid.
+//!
+//! [1]: https://github.com/jgraef/llama-cpp-rs/issues
 
-mod batch;
+pub mod batch;
 pub mod context;
 pub mod grammar;
-pub mod inference;
 pub mod model;
 pub mod quantization;
 pub mod sampling;
@@ -273,5 +337,5 @@ impl TokenType {
     }
 }
 
-type Pos = llama_cpp_sys::llama_pos;
-type SeqId = llama_cpp_sys::llama_seq_id;
+pub type Pos = llama_cpp_sys::llama_pos;
+pub type SeqId = llama_cpp_sys::llama_seq_id;

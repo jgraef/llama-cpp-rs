@@ -14,13 +14,13 @@ use futures::{
     TryStreamExt,
 };
 use llama_cpp::{
-    backend::{sampling::SamplingParameters, grammar::Compiled},
-    grammar::compiler::Buffer,
-    loader::ModelLoader,
-    session::{
-        Session,
-        SessionParameters,
+    backend::{
+        grammar::Compiled,
+        sampling::SamplingParameters,
     },
+    grammar::compiler::Buffer,
+    inference::InferenceParameters,
+    loader::ModelLoader,
 };
 
 #[tokio::main]
@@ -56,23 +56,20 @@ async fn main() -> Result<(), Error> {
         .wait_for_model()
         .await?;
 
-    // create a session
-    let mut session = Session::new(
-        model,
-        SessionParameters {
-            sampling: SamplingParameters {
-                grammar: Some(grammar),
-                ..Default::default()
-            },
+    // create an inference session
+    let mut inference = model.inference(InferenceParameters {
+        sampling: SamplingParameters {
+            grammar: Some(grammar),
             ..Default::default()
         },
-    );
+        ..Default::default()
+    });
 
     // feed prompt to it.
-    session.push_text("Once upon a time", true, false);
+    inference.push_text("Once upon a time", true, false);
 
     // create a response stream from it
-    let stream = session.pieces(None, [], false);
+    let stream = inference.pieces(None, [], false);
     pin_mut!(stream);
 
     // stream LLM output piece by piece

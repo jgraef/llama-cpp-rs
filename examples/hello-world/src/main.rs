@@ -11,10 +11,7 @@ use futures::{
     pin_mut,
     TryStreamExt,
 };
-use llama_cpp::{
-    loader::ModelLoader,
-    session::Session,
-};
+use llama_cpp::loader::ModelLoader;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -41,14 +38,14 @@ async fn main() -> Result<(), Error> {
     print!("{}", prompt);
     stdout().flush()?;
 
-    // create a session
-    let mut session = Session::new(model, Default::default());
+    // create an inference session
+    let mut inference = model.inference(Default::default());
 
     // feed prompt to it.
-    session.push_text(&prompt, true, false);
+    inference.push_text(&prompt, true, false);
 
     // create a response stream from it
-    let stream = session.pieces(None, [], false);
+    let stream = inference.pieces(None, [], false);
     pin_mut!(stream);
 
     // stream LLM output piece by piece

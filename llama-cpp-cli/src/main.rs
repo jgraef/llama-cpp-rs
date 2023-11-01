@@ -17,11 +17,8 @@ use llama_cpp::{
         sampling::SamplingParameters,
         system_info,
     },
+    inference::InferenceParameters,
     loader::ModelLoader,
-    session::{
-        Session,
-        SessionParameters,
-    },
 };
 use structopt::StructOpt;
 
@@ -59,11 +56,10 @@ impl Args {
                     .map(|path| llama_cpp::grammar::compile_from_source(path))
                     .transpose()?;
 
-                let session_parameters = SessionParameters {
+                let inference_parameters = InferenceParameters {
                     context: ContextParameters {
                         seed,
                         n_ctx: Some(512),
-                        n_batch: 512,
                         ..Default::default()
                     },
                     sampling: SamplingParameters {
@@ -80,11 +76,11 @@ impl Args {
                 print!("{}", prompt);
                 stdout().flush()?;
 
-                let mut session = Session::new(model, session_parameters);
+                let mut inference = model.inference(inference_parameters);
 
-                session.push_text(&prompt, true, false);
+                inference.push_text(&prompt, true, false).await?;
 
-                let stream = session.pieces(None, [], false);
+                let stream = inference.pieces(None, [], false);
                 pin_mut!(stream);
 
                 while let Some(piece) = stream.try_next().await? {

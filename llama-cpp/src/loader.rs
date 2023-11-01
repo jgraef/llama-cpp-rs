@@ -1,19 +1,7 @@
-//! Asynchronous loader for models
+//! Asynchronous model loading
 //!
-//! # Example
-//!
-//! ```
-//! # use llama_cpp::{loader::ModelLoader, Error};
-//! # #[tokio::main]
-//! # async fn main() -> Result<(), Error> {
-//! # let model_path = "../data/TinyLLama-v0.gguf";
-//! // load model asynchronously
-//! let model = ModelLoader::load(model_path, Default::default())
-//!     .wait_with_progress(|progress| println!("{:.2} % loaded", progress * 100.0))
-//!     .await?;
-//! # Ok(())
-//! # }
-//! ```
+//! See: [`ModelLoader`]
+
 use std::path::Path;
 
 use crate::{
@@ -30,6 +18,21 @@ use crate::{
 };
 
 /// Loads a model asynchronously.
+///
+/// # Example
+///
+/// ```
+/// # use llama_cpp::{loader::ModelLoader, Error};
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Error> {
+/// # let model_path = "../data/TinyLLama-v0.gguf";
+/// // load model asynchronously
+/// let model = ModelLoader::load(model_path, Default::default())
+///     .wait_with_progress(|progress| println!("{:.2} % loaded", progress * 100.0))
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct ModelLoader {
     progress: watch::Receiver<f32>,
     join_handle: JoinHandle<Result<Model, Error>>,

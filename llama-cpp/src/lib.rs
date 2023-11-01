@@ -5,7 +5,7 @@
 //! Low-level synchronous bindings can be found in the [`backend`] module.
 //!
 //! It's recommend to use the high-level asynchronous interfaces found in
-//! [`loader`] and [`session`].
+//! [`loader`] and [`inference`].
 //!
 //! # Async Runtime
 //!
@@ -16,13 +16,13 @@
 //!  - `runtime-tokio`
 //!
 //! This will automatically enable the `async` feature, which enables the
-//! [`loader`] and [`session`] module.
+//! [`loader`] and [`inference`] module.
 //!
 //! # Example
 //!
 //! ```
 //! # use std::io::{stdout, Write};
-//! # use llama_cpp::{loader::ModelLoader, session::Session, Error};
+//! # use llama_cpp::{loader::ModelLoader, Error};
 //! # use futures::{stream::TryStreamExt, pin_mut};
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Error> {
@@ -37,12 +37,12 @@
 //! print!("{}", prompt);
 //! stdout().flush()?;
 //!
-//! // create a session and feed prompt to it
-//! let mut session = Session::new(model, Default::default());
-//! session.push_text(prompt, true, false);
+//! // create an inference session and feed prompt to it
+//! let mut inference = model.inference(Default::default());
+//! inference.push_text(prompt, true, false).await?;
 //!
 //! // create a response stream from it
-//! let stream = session.pieces(None, [], false);
+//! let stream = inference.pieces(None, [], false);
 //! pin_mut!(stream);
 //!
 //! // stream LLM output piece by piece
@@ -66,10 +66,10 @@ pub mod backend;
 pub mod grammar;
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 #[cfg(feature = "async")]
-pub mod loader;
+pub mod inference;
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 #[cfg(feature = "async")]
-pub mod session;
+pub mod loader;
 mod utils;
 
 #[derive(Debug, thiserror::Error)]

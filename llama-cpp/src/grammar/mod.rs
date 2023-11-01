@@ -33,8 +33,6 @@ mod parser;
 
 use std::path::Path;
 
-pub use ast::Id;
-
 use self::compiler::Compiler;
 use crate::backend::grammar::Compiled;
 

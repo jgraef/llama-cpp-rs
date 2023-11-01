@@ -14,11 +14,8 @@ use futures::{
     TryStreamExt,
 };
 use llama_cpp::{
-    backend::sampling::SamplingParameters,
-    grammar::compiler::{
-        Buffer,
-        Compiled,
-    },
+    backend::{sampling::SamplingParameters, grammar::Compiled},
+    grammar::compiler::Buffer,
     loader::ModelLoader,
     session::{
         Session,

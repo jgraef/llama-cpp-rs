@@ -13,6 +13,14 @@ categories = ["api-bindings", "science", "text-processing"]
 readme = "../README.md"
 license = "MIT"
 
+# docs.rs-specific configuration
+[package.metadata.docs.rs]
+# document all features
+all-features = true
+# defines the configuration attribute `docsrs`
+rustdoc-args = ["--cfg", "docsrs"]
+
+
 #### Dependencies
 
 [dependencies]
@@ -21,10 +29,10 @@ thiserror = "1.0"
 num_cpus = "1.16"
 itertools = "0.11"
 derivative = "2.2"
-futures = "0.3"
-nom = "7.1"
+futures = { version = "0.3", optional = true }
+nom = { version = "7.1", optional = true }
 derive_more = "0.99"
-cfg-if = "1.0"
+cfg-if = { version = "1.0", optional = true }
 
 #### FFI bindings
 
@@ -54,6 +62,8 @@ optional = true
 
 [features]
 # TODO: remove default features, and tell docsrs to build with tokio enabled?
-default = []
-runtime-tokio = ["dep:tokio"]
-runtime-async-std = ["dep:async-std", "dep:async-watch"]
+default = ["async", "grammar"]
+async = ["dep:futures", "cfg-if"]
+grammar = ["dep:nom"]
+runtime-tokio = ["dep:tokio", "async"]
+runtime-async-std = ["dep:async-std", "dep:async-watch", "async"]

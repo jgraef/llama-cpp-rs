@@ -53,10 +53,7 @@
 use std::{
     collections::HashSet,
     pin::Pin,
-    task::{
-        Context,
-        Poll,
-    },
+    task::{self, Poll},
 };
 
 use futures::{
@@ -71,7 +68,10 @@ use crate::{
         spawn_blocking,
     },
     backend::{
-        context::ContextParameters,
+        context::{
+            ContextParameters,
+            DecodeWarning, Context,
+        },
         inference::Inference,
         model::{
             Model,
@@ -86,6 +86,7 @@ use crate::{
     Error,
 };
 
+/// The [`SessionParameters`] are invalid.
 #[derive(Debug, thiserror::Error)]
 pub enum CheckError {
     #[error("invalid context parameters")]
@@ -158,12 +159,17 @@ impl Session {
         Self { model, tx }
     }
 
+    /// Send command to session thread
     fn send_command(&self, command: Command) {
+        // the session thread only terminates if the sender to its command queue is
+        // dropped, thus this doesn't panic.
         self.tx.send(command).expect("session thread terminated")
     }
 
     /// Push tokens (your prompt) into the LLM.
     pub fn push_tokens(&self, tokens: Vec<Token>) {
+        // todo: pass oneshot to get error back,
+        // todo: do we need to check if the tokens are valid?
         self.send_command(Command::Push { tokens });
     }
 
@@ -200,6 +206,7 @@ impl Session {
             _session: self,
             stop_reason: None,
             tx_continue: None,
+            warning: None,
         }
     }
 
@@ -226,7 +233,7 @@ fn session_thread(
     tracing::debug!("model: {}", model.path().display());
     tracing::trace!(?parameters);
 
-    let mut context = model.context(&parameters.context);
+    let mut context = Context::new(model.clone(), &parameters.context);
     let batch_size = parameters
         .batch_size
         .unwrap_or(parameters.context.n_batch as _);
@@ -243,6 +250,8 @@ fn session_thread(
                     }
 
                     // feed the prompt into inference.
+                    // todo: send this error back to the caller. then the session thread doesn't
+                    // produce any errors that it doesn't handle. so we can remove the try-catch.
                     inference.push(&tokens)?;
                 }
                 Command::ResetSampler { parameters } => {
@@ -258,18 +267,26 @@ fn session_thread(
                     let mut i: usize = 0;
 
                     loop {
-                        let token = match inference.sample(&mut sampler) {
-                            Ok(Some(token)) => token,
-                            Ok(None) => {
-                                // eos
-                                break;
-                            }
+                        let sampled = match inference.sample(&mut sampler) {
+                            Ok(sampled) => sampled,
                             Err(e) => {
                                 // an error occured.
                                 tx.blocking_send(SampleStreamItem::Error(e)).ok();
                                 break;
                             }
                         };
+
+                        if let Some(warning) = sampled.warning {
+                            // send warning to stream
+                            tx.blocking_send(SampleStreamItem::Warning(warning)).ok();
+                        }
+
+                        // eos, so we stop
+                        if sampled.token == model.token_eos() {
+                            break;
+                        }
+
+                        let token = sampled.token;
 
                         // if we found a stop token, we stop.
                         if stop_tokens.contains(&token) {
@@ -382,6 +399,7 @@ enum SampleStreamItem {
         token: Token,
         tx_continue: Option<oneshot::Sender<ShouldContinue>>,
     },
+    Warning(DecodeWarning),
     Error(crate::backend::Error),
 }
 
@@ -402,6 +420,9 @@ pub struct TokenStream<'session> {
     /// if in lock-step mode, this is the sender we have to use to continue the
     /// stream. it also allows us to stop the sampling after each token.
     tx_continue: Option<oneshot::Sender<ShouldContinue>>,
+
+    /// The last warning we received
+    warning: Option<DecodeWarning>,
 }
 
 impl<'session> TokenStream<'session> {
@@ -461,6 +482,9 @@ impl<'session> TokenStream<'session> {
                     // the stream was also terminated by the session thread. we
                     // set this as stop reason.
                 }
+                SampleStreamItem::Warning(_) => {
+                    // i think we can just ignore any warnings here.
+                }
                 SampleStreamItem::Error(e) => {
                     // the session thread encountered an error.
                     return Err(e.into());
@@ -506,32 +530,51 @@ impl<'session> TokenStream<'session> {
             token_decoder,
         }
     }
+
+    /// Returns the last decode warning received from the llama.cpp backend.
+    pub fn warning(&self) -> Option<DecodeWarning> {
+        self.warning
+    }
 }
 
 impl<'session> Stream for TokenStream<'session> {
     type Item = Result<Token, Error>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
         // if we have a tx_continue stored, we need to send a continue signal on it, so
         // the sampling thread actually continues.
         self.proceed();
 
         if let Some(rx) = &mut self.rx {
             pin_mut!(rx);
-            rx.poll_next(cx).map(|item_opt| {
-                match item_opt {
-                    Some(SampleStreamItem::Token { token, tx_continue }) => {
+            let mut last_warning = None;
+
+            let poll = loop {
+                let next = rx.as_mut().poll_next(cx);
+
+                match next {
+                    Poll::Ready(Some(SampleStreamItem::Token { token, tx_continue })) => {
                         self.tx_continue = tx_continue;
-                        Some(Ok(token))
+                        break Poll::Ready(Some(Ok(token)));
                     }
-                    Some(SampleStreamItem::Stop { reason }) => {
+                    Poll::Ready(Some(SampleStreamItem::Stop { reason })) => {
                         self.stop_reason = Some(reason);
-                        None
+                        break Poll::Ready(None);
                     }
-                    Some(SampleStreamItem::Error(e)) => Some(Err(e.into())),
-                    None => None,
+                    Poll::Ready(Some(SampleStreamItem::Warning(warning))) => {
+                        last_warning = Some(warning);
+                        // poll another item after this
+                    }
+                    Poll::Ready(Some(SampleStreamItem::Error(e))) => {
+                        break Poll::Ready(Some(Err(e.into())))
+                    }
+                    Poll::Ready(None) => break Poll::Ready(None),
+                    Poll::Pending => break Poll::Pending,
                 }
-            })
+            };
+
+            last_warning.map(|w| self.warning = Some(w));
+            poll
         }
         else {
             Poll::Ready(None)
@@ -587,12 +630,17 @@ impl<'session> PieceStream<'session> {
     pub fn into_tokens(self) -> TokenStream<'session> {
         self.token_stream
     }
+
+    /// Returns the last decode warning received from the llama.cpp backend.
+    pub fn warning(&self) -> Option<DecodeWarning> {
+        self.token_stream.warning()
+    }
 }
 
 impl<'session> Stream for PieceStream<'session> {
     type Item = Result<String, Error>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             let token_stream = &mut self.token_stream;
             pin_mut!(token_stream);

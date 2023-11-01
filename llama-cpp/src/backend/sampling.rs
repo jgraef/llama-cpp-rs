@@ -7,10 +7,12 @@ use std::{
 
 use super::{
     context::Context,
-    grammar::Grammar as LoadedGrammar,
+    grammar::{
+        Compiled as CompiledGrammar,
+        Loaded as LoadedGrammar,
+    },
     Token,
 };
-use crate::grammar::compiler::Compiled as CompiledGrammar;
 
 /// Sampling parameters
 #[derive(Clone, Debug)]
@@ -24,7 +26,7 @@ pub struct SamplingParameters {
 #[derive(Debug, thiserror::Error)]
 pub enum CheckError {
     #[error("grammar invalid")]
-    Grammar(#[from] crate::grammar::compiler::CheckError),
+    Grammar(#[from] super::grammar::CheckError),
 }
 
 impl SamplingParameters {
@@ -169,10 +171,7 @@ impl Sampler {
     pub fn new(parameters: SamplingParameters) -> Self {
         parameters.check().unwrap();
 
-        let grammar = parameters
-            .grammar
-            .as_ref()
-            .map(|grammar| LoadedGrammar::load(grammar));
+        let grammar = parameters.grammar.as_ref().map(|grammar| grammar.load());
 
         let token_buf = parameters.n_prev().map(|n| Buffer::new(n));
 
@@ -316,6 +315,7 @@ impl Sampler {
     }
 
     pub fn feed_prompt_token(&mut self, token: Token) {
+        // todo: is this unsafe, since we can feed invalid tokens?
         self.feed_previous(token);
     }
 }

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+/// Thin wrappers around async stuff, so we can switch between runtimes.
 mod shared;
 
 cfg_if::cfg_if! {
@@ -10,6 +11,6 @@ cfg_if::cfg_if! {
         mod async_std_rt;
         pub use async_std_rt::*;
     } else {
-        std::compile_error!("you need to enable an async runtime by enabling a feature for the wanted runtime.");
+        std::compile_error!("you need to select an async runtime by enabling a feature.");
     }
 }

@@ -16,3 +16,4 @@ emoji = "0.2"
 [dependencies.llama-cpp]
 version = "0.1.0"
 path = "../../llama-cpp"
+features = ["runtime-tokio"]

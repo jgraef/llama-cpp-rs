@@ -7,7 +7,7 @@
 
 mod batch;
 pub mod context;
-pub(crate) mod grammar;
+pub mod grammar;
 pub mod inference;
 pub mod model;
 pub mod quantization;

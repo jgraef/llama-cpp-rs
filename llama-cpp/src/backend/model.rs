@@ -15,10 +15,6 @@ use std::{
 };
 
 use super::{
-    context::{
-        Context,
-        ContextParameters,
-    },
     ffi_path,
     llama_init,
     Error,
@@ -150,10 +146,6 @@ impl Model {
 
     pub fn path(&self) -> &Path {
         &self.inner.path
-    }
-
-    pub fn context(&self, parameters: &ContextParameters) -> Context {
-        Context::new(self.clone(), parameters)
     }
 
     pub fn vocab_type(&self) -> VocabType {

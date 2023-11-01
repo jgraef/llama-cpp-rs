@@ -35,10 +35,8 @@ use std::path::Path;
 
 pub use ast::Id;
 
-use self::compiler::{
-    Compiled,
-    Compiler,
-};
+use self::compiler::Compiler;
+use crate::backend::grammar::Compiled;
 
 /// Grammar parser/compiler error
 #[derive(Debug, thiserror::Error)]

@@ -208,6 +208,14 @@ impl Context {
         }
     }
 
+    pub(super) fn get_embeddings<'a>(&'a self) -> &'a [f32] {
+        let n_embd = self.model.n_embd();
+        unsafe {
+            let data = llama_cpp_sys::llama_get_embeddings(self.handle);
+            slice::from_raw_parts(data, n_embd as usize)
+        }
+    }
+
     /// Returns performance information.
     pub fn timings(&self) -> Timings {
         unsafe { llama_cpp_sys::llama_get_timings(self.handle) }
@@ -227,7 +235,7 @@ impl Drop for Context {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Copy, Clone, Debug, thiserror::Error)]
 pub enum DecodeWarning {
     #[error("no KV slot found")]
     NoKvSlot,

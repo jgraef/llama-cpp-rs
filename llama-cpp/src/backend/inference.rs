@@ -4,7 +4,10 @@ use itertools::Itertools;
 
 use super::{
     batch::Batch,
-    context::Context,
+    context::{
+        Context,
+        DecodeWarning,
+    },
     sampling::Sampler,
     Error,
     Pos,
@@ -15,6 +18,7 @@ use crate::{
     utils::IsLast,
 };
 
+/// Helper for batched decoding and sampling.
 pub struct Inference<'a> {
     context: &'a mut Context,
     batch: Batch,
@@ -23,7 +27,9 @@ pub struct Inference<'a> {
 }
 
 impl<'a> Inference<'a> {
-    /// todo: use `batch_size` from context.
+    /// # Panics
+    /// 
+    /// Panics if the `batch_size` is 0.
     pub fn new(context: &'a mut Context, batch_size: usize) -> Self {
         assert!(batch_size > 0);
 
@@ -38,6 +44,7 @@ impl<'a> Inference<'a> {
         }
     }
 
+    /// Push tokens for decoding.
     pub fn push(&mut self, tokens: &[Token]) -> Result<(), Error> {
         for chunk in &IsLast::new(tokens.into_iter()).chunks(self.batch.size()) {
             self.batch.clear();
@@ -65,7 +72,13 @@ impl<'a> Inference<'a> {
         Ok(())
     }
 
-    pub fn sample(&mut self, sampler: &mut Sampler) -> Result<Option<Token>, Error> {
+    /// Samples new tokens and decodes them.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if no tokens have been pushed for decoding.
+    /// 
+    pub fn sample(&mut self, sampler: &mut Sampler) -> Result<SampleResult, Error> {
         // todo: this should return an error, right?
         let logits_pos = self
             .logits_pos
@@ -90,16 +103,22 @@ impl<'a> Inference<'a> {
         self.pos += 1;
 
         // decode
-        if let Some(warning) = self.context.decode(&mut self.batch)? {
-            // todo
-            tracing::warn!("{}", warning);
-        }
+        let warning = self.context.decode(&mut self.batch)?;
 
-        if next_token == self.context.model().token_eos() {
-            Ok(None)
-        }
-        else {
-            Ok(Some(next_token))
-        }
+        Ok(SampleResult {
+            token: next_token,
+            warning,
+        })
     }
+
+    pub fn get_embeddings(&self) -> &[f32] {
+        self.context.get_embeddings()
+    }
+}
+
+
+#[derive(Copy, Clone, Debug)]
+pub struct SampleResult {
+    pub token: Token,
+    pub warning: Option<DecodeWarning>,
 }

@@ -1,3 +1,5 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 //! Idiomatic Rust bindings for [llama.cpp][1].
 //!
 //! Low-level synchronous bindings can be found in the [`backend`] module.
@@ -12,6 +14,9 @@
 //!
 //!  - `runtime-async-std`
 //!  - `runtime-tokio`
+//!
+//! This will automatically enable the `async` feature, which enables the
+//! [`loader`] and [`session`] module.
 //!
 //! # Example
 //!
@@ -53,10 +58,17 @@
 //! [2]: https://tokio.rs/
 //! [3]: https://async.rs/
 
+#[cfg(feature = "async")]
 mod async_rt;
 pub mod backend;
+#[cfg_attr(docsrs, doc(cfg(feature = "grammar")))]
+#[cfg(feature = "grammar")]
 pub mod grammar;
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+#[cfg(feature = "async")]
 pub mod loader;
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+#[cfg(feature = "async")]
 pub mod session;
 mod utils;
 
@@ -68,6 +80,7 @@ pub enum Error {
     #[error("backend error")]
     Backend(#[from] crate::backend::Error),
 
+    #[cfg(feature = "grammar")]
     #[error("grammar error")]
     Grammar(#[from] crate::grammar::Error),
 }

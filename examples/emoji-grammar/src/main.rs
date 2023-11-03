@@ -69,7 +69,7 @@ async fn main() -> Result<(), Error> {
     inference.push_text("Once upon a time", true, false).await?;
 
     // create a response stream from it
-    let stream = inference.pieces(None, [], false);
+    let stream = inference.pieces(Default::default());
     pin_mut!(stream);
 
     // stream LLM output piece by piece

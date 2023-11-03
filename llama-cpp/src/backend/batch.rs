@@ -11,9 +11,9 @@ use super::{
 /// llama batch
 pub struct Batch {
     pub(super) data: llama_cpp_sys::llama_batch,
-    n_embd: usize,
-    tokens_buf_size: usize,
-    n_seq_max: usize,
+    n_embd: u32,
+    tokens_buf_size: u32,
+    n_seq_max: u32,
 }
 
 unsafe impl Send for Batch {}
@@ -24,11 +24,11 @@ impl Batch {
     /// # Panics
     ///
     /// Panics if `n_tokens` is 0.
-    pub fn new_tokens(n_tokens: usize, n_seq_max: usize) -> Self {
+    pub fn new_tokens(n_tokens: u32, n_seq_max: u32) -> Self {
         Self::new(n_tokens, 0, n_seq_max)
     }
 
-    fn new(n_tokens: usize, n_embd: usize, n_seq_max: usize) -> Self {
+    fn new(n_tokens: u32, n_embd: u32, n_seq_max: u32) -> Self {
         assert!(n_tokens > 0);
 
         tracing::trace!(n_tokens, n_seq_max, "calling llama_batch_init");
@@ -47,17 +47,17 @@ impl Batch {
     }
 
     /// Returns the size of the token buffer.
-    pub fn size(&self) -> usize {
+    pub fn size(&self) -> u32 {
         self.tokens_buf_size
     }
 
     /// Returns the embedding size, or 0 if this buffer can't accept embeddings.
-    pub fn n_embd(&self) -> usize {
+    pub fn n_embd(&self) -> u32 {
         self.n_embd
     }
 
     /// Returns the max number of sequences.
-    pub fn n_seq_max(&self) -> usize {
+    pub fn n_seq_max(&self) -> u32 {
         self.n_seq_max
     }
 
@@ -104,26 +104,29 @@ impl Batch {
 
         assert_eq!(self.n_embd, 0, "this batch has no token buffer");
         assert!(!self.data.token.is_null()); // this is a bug
-        assert!(seq_ids.len() <= self.n_seq_max);
-        assert!(n_tokens < self.tokens_buf_size, "batch buffer is full");
+        assert!(seq_ids.len() <= self.n_seq_max as _);
+        assert!(n_tokens < self.tokens_buf_size as _, "batch buffer is full");
 
         unsafe {
-            let token_buf = slice::from_raw_parts_mut(self.data.token, self.tokens_buf_size);
+            let token_buf = slice::from_raw_parts_mut(self.data.token, self.tokens_buf_size as _);
             token_buf[n_tokens] = id;
 
-            let pos_buf = slice::from_raw_parts_mut(self.data.pos, self.tokens_buf_size);
+            let pos_buf = slice::from_raw_parts_mut(self.data.pos, self.tokens_buf_size as _);
             pos_buf[n_tokens] = pos;
 
-            let n_seq_id_buf = slice::from_raw_parts_mut(self.data.n_seq_id, self.tokens_buf_size);
+            let n_seq_id_buf =
+                slice::from_raw_parts_mut(self.data.n_seq_id, self.tokens_buf_size as _);
             n_seq_id_buf[n_tokens] = seq_ids.len() as _;
 
             for i in 0..seq_ids.len() {
-                let seq_id_buf = slice::from_raw_parts_mut(self.data.seq_id, self.tokens_buf_size);
-                let seq_id_buf = slice::from_raw_parts_mut(seq_id_buf[n_tokens], self.n_seq_max);
+                let seq_id_buf =
+                    slice::from_raw_parts_mut(self.data.seq_id, self.tokens_buf_size as _);
+                let seq_id_buf =
+                    slice::from_raw_parts_mut(seq_id_buf[n_tokens], self.n_seq_max as _);
                 seq_id_buf[i] = seq_ids[i];
             }
 
-            let logits_buf = slice::from_raw_parts_mut(self.data.logits, self.tokens_buf_size);
+            let logits_buf = slice::from_raw_parts_mut(self.data.logits, self.tokens_buf_size as _);
             logits_buf[n_tokens] = logits as _;
         }
 
@@ -131,17 +134,16 @@ impl Batch {
     }
 
     /// Sets the `logits` flag for the last element in this batch.
-    #[allow(dead_code)]
     pub fn set_last_logits(&mut self, logits: bool) {
-        let Some(n_tokens) = (self.data.n_tokens as usize).checked_sub(1)
+        let Some(n_tokens) = (self.data.n_tokens as u32).checked_sub(1)
         else {
             return;
         };
         assert!(n_tokens < self.tokens_buf_size);
 
         unsafe {
-            let logits_buf = slice::from_raw_parts_mut(self.data.logits, n_tokens);
-            logits_buf[n_tokens] = logits as i8;
+            let logits_buf = slice::from_raw_parts_mut(self.data.logits, n_tokens as _);
+            logits_buf[n_tokens as usize] = logits as i8;
         }
     }
 }

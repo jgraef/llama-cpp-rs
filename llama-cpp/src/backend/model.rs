@@ -246,18 +246,37 @@ impl Model {
     /// # Panics
     ///
     /// Panics if the token is not in the vocabulary.
-    pub fn get_token_text(&self, token: Token, output: &mut Vec<u8>) {
+    pub fn token_to_piece(&self, token: Token, output: &mut Vec<u8>) {
         self.assert_valid_token(token);
 
-        let text = unsafe {
+        const BUF_SIZE: usize = 32;
+        let mut buf = [0u8; BUF_SIZE];
+
+        let n = unsafe {
+            llama_cpp_sys::llama_token_to_piece(
+                self.inner.handle,
+                token,
+                buf.as_mut_ptr() as _,
+                BUF_SIZE as _,
+            ) as usize
+        };
+
+        output.extend_from_slice(&buf[..n]);
+    }
+
+    /// Returns the text for a token. If you want to turn a token stream into
+    /// text, you should use [`Model::token_decoder`]. This turns special tokens
+    /// into a special representation. E.g. it turns a newline into
+    /// '<0x0A>'.
+    pub fn get_token_text<'a>(&'a self, token: Token) -> Result<&'a str, Error> {
+        let c_str = unsafe {
             CStr::from_ptr(llama_cpp_sys::llama_token_get_text(
                 self.inner.handle,
                 token,
             ))
         };
 
-        tracing::trace!(?text, "get_token_text");
-        output.extend_from_slice(text.to_bytes());
+        Ok(c_str.to_str()?)
     }
 
     pub fn get_token_score(&self, token: Token) -> f32 {
@@ -340,7 +359,7 @@ impl TokenDecoder {
     }
 
     pub fn push_token(&mut self, token: Token) {
-        self.model.get_token_text(token, &mut self.buf);
+        self.model.token_to_piece(token, &mut self.buf);
     }
 
     /// Returns the internal buffer as `String`. This returns `None` if the

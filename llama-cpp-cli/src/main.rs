@@ -11,30 +11,73 @@ use futures::{
     pin_mut,
     TryStreamExt,
 };
+use inquire::InquireError;
 use llama_cpp::{
     backend::{
         context::ContextParameters,
         sampling::SamplingParameters,
         system_info,
     },
-    inference::InferenceParameters,
+    inference::{
+        Inference,
+        InferenceParameters,
+    },
     loader::ModelLoader,
 };
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
+struct ModelOptions {
+    #[structopt(short, long)]
+    model: PathBuf,
+
+    #[structopt(short, long)]
+    seed: Option<u32>,
+
+    #[structopt(short, long)]
+    grammar: Option<PathBuf>,
+}
+
+impl ModelOptions {
+    async fn inference(&self) -> Result<Inference, Error> {
+        let grammar = self
+            .grammar
+            .as_ref()
+            .map(|path| llama_cpp::grammar::compile_from_source(path))
+            .transpose()?;
+
+        let inference_parameters = InferenceParameters {
+            context: ContextParameters {
+                seed: self.seed,
+                n_ctx: Some(512),
+                ..Default::default()
+            },
+            sampling: SamplingParameters {
+                grammar,
+                ..Default::default()
+            },
+            batch_size: Some(64),
+        };
+
+        let model = ModelLoader::load(&self.model, Default::default())
+            .wait_for_model()
+            .await?;
+
+        Ok(model.inference(inference_parameters))
+    }
+}
+
+#[derive(Debug, StructOpt)]
 enum Args {
     Generate {
-        #[structopt(short, long)]
-        model: PathBuf,
-
-        #[structopt(short, long)]
-        seed: Option<u32>,
-
-        #[structopt(short, long)]
-        grammar: Option<PathBuf>,
+        #[structopt(flatten)]
+        model_options: ModelOptions,
 
         prompt: String,
+    },
+    Chat {
+        #[structopt(flatten)]
+        model_options: ModelOptions,
     },
     SystemInfo,
     PrintVocab {
@@ -47,48 +90,13 @@ impl Args {
     pub async fn run(self) -> Result<(), Error> {
         match self {
             Self::Generate {
-                model,
-                seed,
-                grammar,
+                model_options,
                 prompt,
             } => {
-                let grammar = grammar
-                    .map(|path| llama_cpp::grammar::compile_from_source(path))
-                    .transpose()?;
-
-                let inference_parameters = InferenceParameters {
-                    context: ContextParameters {
-                        seed,
-                        n_ctx: Some(512),
-                        ..Default::default()
-                    },
-                    sampling: SamplingParameters {
-                        grammar,
-                        ..Default::default()
-                    },
-                    batch_size: Some(64),
-                };
-
-                let model = ModelLoader::load(&model, Default::default())
-                    .wait_for_model()
-                    .await?;
-
-                print!("{}", prompt);
-                stdout().flush()?;
-
-                let mut inference = model.inference(inference_parameters);
-
-                inference.push_text(&prompt, true, false).await?;
-
-                let stream = inference.pieces(None, [], false);
-                pin_mut!(stream);
-
-                while let Some(piece) = stream.try_next().await? {
-                    print!("{piece}");
-                    stdout().flush()?;
-                }
-
-                println!("");
+                generate(model_options, &prompt).await?;
+            }
+            Self::Chat { model_options } => {
+                chat(model_options).await?;
             }
             Self::SystemInfo => {
                 let info = system_info();
@@ -100,28 +108,75 @@ impl Args {
                     .await?;
 
                 let n_vocab = model.n_vocab();
-                let mut buf = Vec::with_capacity(32);
 
                 for i in 0..n_vocab {
-                    model.get_token_text(i as _, &mut buf);
+                    let s = model.get_token_text(i as _)?;
 
-                    if let Ok(s) = std::str::from_utf8(&buf) {
-                        println!("{i} = '{s}'");
-                    }
-                    else if buf.len() == 1 {
-                        println!("{i} = 0x{:02x}", buf[0]);
-                    }
-                    else {
-                        println!("{i} = {:?}", buf);
-                    }
-
-                    buf.clear();
+                    println!("{i} = {s}");
                 }
             }
         }
 
         Ok(())
     }
+}
+
+async fn generate(model_options: ModelOptions, prompt: &str) -> Result<(), Error> {
+    let mut inference = model_options.inference().await?;
+
+    print!("{}", prompt);
+    stdout().flush()?;
+
+    inference.push_text(&prompt, true, false).await?;
+
+    let stream = inference.pieces(Default::default());
+    pin_mut!(stream);
+
+    while let Some(piece) = stream.try_next().await? {
+        print!("{piece}");
+        stdout().flush()?;
+    }
+
+    println!("");
+
+    Ok(())
+}
+
+async fn chat(model_options: ModelOptions) -> Result<(), Error> {
+    let mut inference = model_options.inference().await?;
+    let mut is_first = true;
+
+    loop {
+        let text = match prompt("").await {
+            Ok(text) => text,
+            Err(InquireError::OperationCanceled) | Err(InquireError::OperationInterrupted) => break,
+            Err(e) => return Err(e.into()),
+        };
+
+        inference.push_text(&text, is_first, true).await?;
+
+        let stream = inference.pieces(Default::default());
+        pin_mut!(stream);
+
+        while let Some(piece) = stream.try_next().await? {
+            print!("{piece}");
+            stdout().flush()?;
+        }
+        println!("");
+
+        is_first = false;
+    }
+
+    Ok(())
+}
+
+async fn prompt(prompt: impl ToString) -> Result<String, InquireError> {
+    let prompt = prompt.to_string();
+    Ok(
+        tokio::task::spawn_blocking(move || inquire::Text::new(&prompt).prompt())
+            .await
+            .expect("join error")?,
+    )
 }
 
 #[tokio::main]

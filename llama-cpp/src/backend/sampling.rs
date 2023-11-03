@@ -362,7 +362,8 @@ impl Sampler {
 
         // feed token into grammar
         //
-        // It's very important that we only feed tokens to the grammar that can be accepted by it.
+        // It's very important that we only feed tokens to the grammar that can be
+        // accepted by it.
         if let Some(grammar) = &mut self.grammar {
             // see safety section in [`Grammar::accept_token`].
             unsafe {
@@ -378,6 +379,16 @@ impl Sampler {
         if let Some(token_buf) = &mut self.token_buf {
             token_buf.push(token);
         }
+    }
+
+    /// Reloads the grammar state machine. Tells the sampler to start the
+    /// grammar from its root node again.
+    pub fn reload_grammar(&mut self) {
+        self.grammar = self
+            .parameters
+            .grammar
+            .as_ref()
+            .map(|grammar| grammar.load());
     }
 }
 

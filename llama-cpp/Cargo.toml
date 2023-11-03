@@ -15,7 +15,7 @@ license = "MIT"
 # docs.rs-specific configuration
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]
-
+features = ["runtime-tokio"]
 
 #### Dependencies
 
@@ -53,6 +53,9 @@ optional = true
 version = "0.3"
 optional = true
 
+#### dev dependenvies
+[dev-dependencies]
+lipsum = "0.9"
 
 #### Features
 

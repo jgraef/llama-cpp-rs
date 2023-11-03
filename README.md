@@ -6,7 +6,11 @@
 The crate `llama-cpp` contains idiomatic Rust bindings for [llama.cpp][1].
 It offers a low-level synchronous API and a high-level asynchronous API.
 
-A simple command line interface that also serves as an example is included in `llama-cpp-cli`.
+A simple command line interface that also serves as an example is included in `llama-cpp-cli`. Try running:
+
+```bash
+cargo run -- chat -m path/to/model.gguf
+```
 
 `llama-cpp-sys` contains the low-level FFI bindings to [llama.cpp][1]. It has the [llama.cpp][1] source code in a git submodule.
 The build script takes care of building, and linking to [llama.cpp][1]. It links statically to it and generates bindings using bindgen.
@@ -18,7 +22,7 @@ git submodule update --init -- llama-cpp-sys/llama.cpp/
 
 ## Async Runtime
 
-Both [Tokio][2] and [async-std][3] are supported. You choose which one is used by enabling one of the following features
+Both [Tokio][2] and [async-std][3] are supported. You choose which one is used by enabling one of the following features:
 
  - `runtime-async-std`
  - `runtime-tokio`
@@ -36,6 +40,7 @@ Both [Tokio][2] and [async-std][3] are supported. You choose which one is used b
  - [ ] logit bias
  - [x] tokio runtime
  - [x] async-std runtime
+ - [ ] API server
 
 ## Example
 

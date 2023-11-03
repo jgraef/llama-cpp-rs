@@ -8,7 +8,10 @@ use super::{
     batch::Batch,
     default_n_threads,
     model::Model,
-    sampling::{Sampler, Candidates},
+    sampling::{
+        Candidates,
+        Sampler,
+    },
     Error,
     Pos,
     Token,
@@ -51,9 +54,6 @@ pub struct ContextParameters {
     /// Use fp16 for KV cache, fp32 otherwise.
     pub kv_cache_type: KvCacheType,
 
-    /// The `llama_eval()` call computes all logits, not just the last one.
-    pub logits_all: bool,
-
     /// Store embeddings
     pub embedding: bool,
 }
@@ -74,7 +74,7 @@ impl ContextParameters {
     fn to_ffi(&self) -> llama_cpp_sys::llama_context_params {
         llama_cpp_sys::llama_context_params {
             seed: self.seed.unwrap_or(u32::MAX),
-            n_ctx: self.n_ctx.unwrap_or(0),
+            n_ctx: self.n_ctx.unwrap_or_default(),
             n_batch: self.n_batch_max,
             n_threads: self.n_threads.unwrap_or(default_n_threads()),
             n_threads_batch: self.n_threads_batch.unwrap_or(default_n_threads()),
@@ -82,7 +82,7 @@ impl ContextParameters {
             rope_freq_scale: self.rope_fre_scale.unwrap_or_default(),
             mul_mat_q: self.mul_mat_q,
             f16_kv: matches!(self.kv_cache_type, KvCacheType::F16),
-            logits_all: self.logits_all,
+            logits_all: false, // we don't need this, since we use the batch API.
             embedding: self.embedding,
         }
     }
@@ -100,7 +100,6 @@ impl Default for ContextParameters {
             rope_fre_scale: None,
             mul_mat_q: true,
             kv_cache_type: Default::default(),
-            logits_all: false,
             embedding: false,
         }
     }
@@ -117,7 +116,13 @@ pub struct Context {
     model: Model,
 
     /// The number of tokens in the last batch_decode
-    n_tokens: i32,
+    n_tokens: u32,
+
+    /// Context size
+    n_ctx: u32,
+
+    /// Total number of tokens decoded
+    n_past: u32,
 
     /// Maximum batch size
     n_batch_max: u32,
@@ -141,11 +146,19 @@ impl Context {
 
         let handle =
             unsafe { llama_cpp_sys::llama_new_context_with_model(model.inner.handle, parameters) };
+        assert!(
+            !handle.is_null(),
+            "llama_new_context_with_model returned NULL"
+        );
+
+        let n_ctx = unsafe { llama_cpp_sys::llama_n_ctx(handle) } as _;
 
         Self {
             handle,
             model,
             n_tokens: 0,
+            n_ctx,
+            n_past: 0,
             n_batch_max,
         }
     }
@@ -155,7 +168,8 @@ impl Context {
     /// # Panics
     ///
     /// Panics if the `batch_size` is 0.
-    pub fn decoder(&mut self, batch_size: usize) -> Decoder {
+    pub fn decoder(&mut self, batch_size: impl Into<Option<u32>>) -> Decoder {
+        let batch_size = batch_size.into().unwrap_or(self.n_batch_max);
         Decoder::new(self, batch_size)
     }
 
@@ -165,7 +179,15 @@ impl Context {
     }
 
     pub fn n_ctx(&mut self) -> u32 {
-        unsafe { llama_cpp_sys::llama_n_ctx(self.handle) as u32 }
+        self.n_ctx
+    }
+
+    pub fn n_batch_max(&self) -> u32 {
+        self.n_batch_max
+    }
+
+    pub fn n_past(&self) -> u32 {
+        self.n_past
     }
 
     /// Returns the internal state as bytes.
@@ -216,12 +238,20 @@ impl Context {
 
     /// Decode a batch
     ///
+    /// This returns an error if the call to `llama_decode` fails, or if the kv
+    /// cache is full.
+    ///
     /// # Panics
     ///
-    /// Panics if the number of tokens in the batch are 0 or if they exceed the
+    /// Panics if the number of tokens in the batch exceeds the
     /// max batch size, or if `batch.n_embd` is invalid.
-    pub fn decode_batch(&mut self, batch: &Batch) -> Result<Option<DecodeWarning>, Error> {
+    pub fn decode_batch(&mut self, batch: &Batch) -> Result<(), Error> {
         tracing::trace!("calling llama_decode");
+
+        // if the batch is empty, we do nothing.
+        if batch.data.n_tokens == 0 {
+            return Ok(());
+        }
 
         assert!(batch.data.n_tokens > 0);
         // or should we rather check that the batch size is smaller than n_batch?
@@ -230,15 +260,70 @@ impl Context {
 
         // remember this for later. some arrays in the context are resized according to
         // this (and n_vocab)
-        self.n_tokens = batch.data.n_tokens;
+        self.n_tokens = batch.data.n_tokens as _;
+
+        // we need to know when we run out of context.
+        self.n_past += batch.data.n_tokens as u32;
 
         let ret = unsafe { llama_cpp_sys::llama_decode(self.handle, batch.data) };
+
         match ret {
-            0 => Ok(None),
-            1 => Ok(Some(DecodeWarning::NoKvSlot)),
+            0 => Ok(()),
+            1 => Err(Error::KvCacheFull),
             _ if ret < 0 => Err(Error::DecodeError),
-            _ if ret > 0 => Ok(Some(DecodeWarning::Unknown(ret))),
+            _ if ret > 0 => panic!("llama_decode returned unknown warning: {ret}"),
             _ => unreachable!(),
+        }
+    }
+
+    pub fn swap(&mut self, n_keep: u32) {
+        /* taken from llama.cpp/examples/main/main.cpp
+
+            const int n_left    = n_past - params.n_keep - 1;
+            const int n_discard = n_left/2;
+
+            llama_kv_cache_seq_rm   (ctx, 0, params.n_keep + 1            , params.n_keep + n_discard + 1);
+            llama_kv_cache_seq_shift(ctx, 0, params.n_keep + 1 + n_discard, n_past, -n_discard);
+
+            n_past -= n_discard;
+        */
+
+        println!("n_keep = {n_keep}, n_past={}", self.n_past);
+        let n_left = (self.n_past as i32) - (n_keep as i32) - 1;
+        let n_discard = n_left / 2;
+        println!("n_left = {n_left}, n_discard = {n_discard}");
+        assert!(n_discard > 0);
+
+        // todo
+        let seq_id = 0;
+        let n_keep = n_keep as i32;
+
+        tracing::debug!(n_keep, n_left, n_discard, "context swap");
+
+        unsafe {
+            llama_cpp_sys::llama_kv_cache_seq_rm(
+                self.handle,
+                seq_id,
+                n_keep + 1,
+                n_keep + n_discard + 1,
+            );
+            llama_cpp_sys::llama_kv_cache_seq_shift(
+                self.handle,
+                seq_id,
+                n_keep + n_discard + 1,
+                self.n_past as i32,
+                -n_discard,
+            );
+        }
+
+        self.n_past = self.n_past
+            .checked_sub(n_discard as u32)
+            .expect("bug: discarded more than we have");
+    }
+
+    pub fn swap_if_needed(&mut self, n_tokens: u32, n_keep: u32) {
+        if self.n_past + n_tokens > self.n_ctx {
+            self.swap(n_keep);
         }
     }
 
@@ -248,21 +333,20 @@ impl Context {
     /// # Panics
     ///
     /// Panics if the token index is out of bounds.
-    pub fn get_logits_ith<'a>(&'a self, i: i32) -> &'a [f32] {
-        assert!(i >= 0 && i < self.n_tokens, "invalid logits index");
+    pub fn get_logits_ith<'a>(&'a self, i: u32) -> &'a [f32] {
+        assert!(i < self.n_tokens, "invalid logits index");
 
         let n_vocab = self.model.n_vocab();
         unsafe {
-            let data = llama_cpp_sys::llama_get_logits_ith(self.handle, i);
+            // this array is n_tokens * n_vocab elements large.
+            let data = llama_cpp_sys::llama_get_logits_ith(self.handle, i as _);
             assert!(!data.is_null());
             slice::from_raw_parts(data, n_vocab as usize)
         }
     }
 
-    fn get_embeddings<'a>(&'a self) -> Option<&'a [f32]> {
+    pub fn get_embeddings<'a>(&'a self) -> Option<&'a [f32]> {
         // according to llama.cpp this array has the size of `n_embd` from the model.
-        // but i think it's only initialized if the context parameter `embedding` is
-        // true.
         let n_embd = self.model.n_embd();
 
         unsafe {
@@ -295,15 +379,6 @@ impl Drop for Context {
     }
 }
 
-#[derive(Copy, Clone, Debug, thiserror::Error)]
-pub enum DecodeWarning {
-    #[error("no KV slot found")]
-    NoKvSlot,
-
-    #[error("unknown warning: {0}")]
-    Unknown(i32),
-}
-
 #[derive(Clone, Copy, Debug)]
 pub enum KvCacheType {
     F16,
@@ -319,6 +394,7 @@ impl Default for KvCacheType {
 pub type Timings = llama_cpp_sys::llama_timings;
 
 /// Helper to do batched decoding and sampling.
+// todo: rename
 pub struct Decoder<'a> {
     context: &'a mut Context,
     batch: Batch,
@@ -332,8 +408,11 @@ impl<'a> Decoder<'a> {
     /// # Panics
     ///
     /// Panics if the `batch_size` is 0.
-    pub fn new(context: &'a mut Context, batch_size: usize) -> Self {
-        assert!(batch_size > 0);
+    pub fn new(context: &'a mut Context, batch_size: u32) -> Self {
+        assert!(
+            batch_size > 0 && batch_size <= context.n_batch_max,
+            "invalid batch size"
+        );
 
         // for now we'll have `n_seq_max=1`.
         let batch = Batch::new_tokens(batch_size, 1);
@@ -351,6 +430,10 @@ impl<'a> Decoder<'a> {
     /// If `logits_for_last_token` is `true` this will produce logits for the
     /// last token. You want this if you want to sample tokens next. For
     /// embedding you can set this to `false`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if one if the passed tokens is invalid.
     pub fn decode(&mut self, tokens: &[Token], logits_for_last_token: bool) -> Result<(), Error> {
         for token in tokens {
             self.context.model.assert_valid_token(*token);
@@ -370,27 +453,29 @@ impl<'a> Decoder<'a> {
         tokens: &[Token],
         logits_for_last_token: bool,
     ) -> Result<(), Error> {
-        for chunk in &IsLast::new(tokens.into_iter()).chunks(self.batch.size()) {
+        for chunk in IsLast::new(tokens.into_iter())
+            .chunks(self.batch.size() as _)
+            .into_iter()
+        {
             self.batch.clear();
 
-            for (token, is_last) in chunk {
+            for (i, (token, is_last)) in chunk.into_iter().enumerate() {
                 // add token to batch
                 self.batch.add_token(*token, self.pos, &[0], is_last);
 
                 // generate logits for the last position
                 if is_last && logits_for_last_token {
-                    self.logits_pos = Some(self.pos);
+                    self.logits_pos = Some(i as _);
                 }
 
                 self.pos += 1;
             }
 
+            // todo: make this optional
+            self.context.swap_if_needed(self.batch.data.n_tokens as u32, 4);
+
             // decode
-            if let Some(warning) = self.context.decode_batch(&self.batch)? {
-                // todo
-                tracing::warn!("{}", warning);
-                //warnings.push(warning);
-            }
+            self.context.decode_batch(&self.batch)?;
         }
 
         Ok(())
@@ -401,12 +486,12 @@ impl<'a> Decoder<'a> {
     /// # Panics
     ///
     /// Panics if no tokens have been pushed for decoding.
-    pub fn sample_and_decode(&mut self, sampler: &mut Sampler) -> Result<SampleResult, Error> {
+    pub fn sample_and_decode(&mut self, sampler: &mut Sampler) -> Result<Token, Error> {
         // todo: this should return an error, right?
         let logits_pos = self
             .logits_pos
-            .expect("sample was called before a prompt was feed into inference");
-        let logits = self.context.get_logits_ith(logits_pos);
+            .expect("batch hasn't decoded to any logits yet");
+        let logits = self.context.get_logits_ith(logits_pos as _);
 
         // sample next token
         let candidates = Candidates::from_logits(logits);
@@ -427,34 +512,39 @@ impl<'a> Decoder<'a> {
         self.pos += 1;
 
         // decode
-        let warning = self.context.decode_batch(&mut self.batch)?;
+        self.context.decode_batch(&mut self.batch)?;
 
-        Ok(SampleResult {
-            token: next_token,
-            warning,
-        })
+        Ok(next_token)
     }
-
-    pub fn get_embeddings(&self) -> Option<&[f32]> {
-        self.context.get_embeddings()
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct SampleResult {
-    pub token: Token,
-    pub warning: Option<DecodeWarning>,
 }
 
 #[cfg(test)]
 mod tests {
+    use lipsum::lipsum;
+
+    use super::*;
     use crate::{
-        backend::context::ContextParameters,
+        backend::{
+            context::ContextParameters,
+            sampling::Sampler,
+        },
         utils::test::{
             context,
             model,
         },
     };
+
+    fn sample_until_eos<'a>(decoder: &mut Decoder<'a>, sampler: &mut Sampler) -> Vec<Token> {
+        let mut tokens = vec![];
+        loop {
+            let token = decoder.sample_and_decode(sampler).unwrap();
+            if token == decoder.context.model().token_eos() {
+                break;
+            }
+            tokens.push(token);
+        }
+        tokens
+    }
 
     #[test]
     #[should_panic]
@@ -481,6 +571,7 @@ mod tests {
         let tokens = model.tokenize("Hello World", true, false);
 
         let mut context = model.context(&ContextParameters {
+            seed: Some(1234),
             embedding: true,
             ..Default::default()
         });
@@ -492,5 +583,46 @@ mod tests {
             .get_embeddings()
             .expect("context returned no embeddings");
         assert_ne!(embeddings[0], 0.0);
+    }
+
+    #[test]
+    fn decode_twice() {
+        let mut context = context();
+        let tokens = context.model().tokenize("Hello World", true, false);
+        let mut decoder = context.decoder(tokens.len() as u32);
+        decoder.decode(&tokens, false).unwrap();
+        decoder.decode(&tokens, false).unwrap();
+    }
+
+    #[test]
+    fn it_decodes_long_input() {
+        let mut context = context();
+        println!("n_ctx = {}", context.n_ctx());
+
+        let tokens = context.model().tokenize(&lipsum(512), true, false);
+        let mut decoder = context.decoder(64);
+        decoder.decode(&tokens, true).unwrap();
+
+        let mut sampler = Sampler::new(Default::default());
+        let tokens = sample_until_eos(&mut decoder, &mut sampler);
+        println!("{:?}", tokens);
+        //assert_eq!(token, 23);
+    }
+
+    #[test]
+    fn batch_size_doesnt_influence_output() {
+        let tokens = model().tokenize("Hello World", true, false);
+
+        let gen = |batch_size: u32| {
+            let mut context = context();
+            let mut decoder = context.decoder(Some(batch_size));
+            decoder.decode(&tokens, true).unwrap();
+            let mut sampler = Sampler::new(Default::default());
+            sample_until_eos(&mut decoder, &mut sampler)
+        };
+
+        let output1 = gen(512);
+        let output2 = gen(32);
+        assert_eq!(output1, output2);
     }
 }

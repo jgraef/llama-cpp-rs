@@ -19,7 +19,7 @@
 //! inference.push_text("Write a poem.", true, false).await?;
 //!
 //! // get a stream of word pieces.
-//! let stream = inference.pieces(None, [], false);
+//! let stream = inference.pieces(Default::default());
 //! pin_mut!(stream);
 //!
 //! // stream LLM output piece by piece
@@ -51,7 +51,6 @@
 //! [`PieceStream::stop`].
 
 use std::{
-    collections::HashSet,
     pin::Pin,
     task::{
         self,
@@ -74,7 +73,6 @@ use crate::{
         context::{
             Context,
             ContextParameters,
-            DecodeWarning,
             Decoder,
         },
         model::{
@@ -100,7 +98,7 @@ pub enum CheckError {
     Sampling(#[from] crate::backend::sampling::CheckError),
 
     #[error("invalid batch size: {0}")]
-    BatchSize(usize),
+    BatchSize(u32),
 }
 
 /// Session parameters
@@ -115,7 +113,7 @@ pub struct InferenceParameters {
     /// The batch size to use. If `None` the max batch size from the context
     /// will be used.
     // todo: i think we can remove this and just use the max batch size in context.
-    pub batch_size: Option<usize>,
+    pub batch_size: Option<u32>,
 }
 
 impl InferenceParameters {
@@ -134,6 +132,36 @@ impl InferenceParameters {
             })
             .transpose()?;
         Ok(())
+    }
+}
+
+/// Options for sampling a single response.
+///
+/// See also: [`SamplingParameters`].
+#[derive(Clone, Debug)]
+pub struct SamplingOptions {
+    /// Number of tokens to sample, or None if unlimited. Default `None`.
+    pub max_tokens: Option<usize>,
+
+    /// Tokens to stop at. Default `vec![]`.
+    pub stop_tokens: Vec<Token>,
+
+    /// See [module documentation](crate::inference#lock-step-mode). Default
+    /// `false`.
+    pub lock_step: bool,
+
+    /// Reload the grammar after sampling the response. Default: `true`.
+    pub reload_grammar: bool,
+}
+
+impl Default for SamplingOptions {
+    fn default() -> Self {
+        Self {
+            max_tokens: None,
+            stop_tokens: vec![],
+            lock_step: false,
+            reload_grammar: true,
+        }
     }
 }
 
@@ -176,7 +204,8 @@ impl Inference {
             tokens,
             tx_result: tx,
         });
-        rx.await.expect("session thread dropped result sender")
+        let _warnings = rx.await.expect("session thread dropped result sender")?;
+        Ok(())
     }
 
     /// Push tokens (e.g. your prompt) into the LLM.
@@ -212,42 +241,32 @@ impl Inference {
     }
 
     /// Returns a stream of [`Token`]s.
-    pub fn tokens<'session>(
-        &'session mut self,
-        max_tokens: Option<usize>,
-        stop_tokens: impl IntoIterator<Item = Token>,
-        lock_step: bool,
-    ) -> TokenStream<'session> {
-        let (tx, rx) =
-            mpsc::bounded::channel(max_tokens.unwrap_or(TokenStream::DEFAULT_CHANNEL_SIZE));
+    pub fn tokens<'session>(&'session mut self, options: SamplingOptions) -> TokenStream<'session> {
+        let (tx, rx) = mpsc::bounded::channel(
+            options
+                .max_tokens
+                .unwrap_or(TokenStream::DEFAULT_CHANNEL_SIZE),
+        );
 
-        self.send_command(Command::Sample {
-            max_tokens,
-            stop_tokens: stop_tokens.into_iter().collect(),
-            tx,
-            lock_step,
-        });
+        self.send_command(Command::Sample { tx, options });
 
         TokenStream {
             rx: Some(rx),
             _session: self,
             stop_reason: None,
             tx_continue: None,
-            warning: None,
         }
     }
 
     /// Returns a stream of text pieces (words or fragments of words).
-    pub fn pieces<'session>(
-        &'session mut self,
-        max_tokens: Option<usize>,
-        stop_tokens: impl IntoIterator<Item = Token>,
-        lock_step: bool,
-    ) -> PieceStream<'session> {
+    pub fn pieces<'session>(&'session mut self, options: SamplingOptions) -> PieceStream<'session> {
         let token_decoder = self.model.token_decoder();
 
-        self.tokens(max_tokens, stop_tokens, lock_step)
-            .into_pieces(token_decoder)
+        self.tokens(options).into_pieces(token_decoder)
+    }
+
+    pub fn reload_grammar(&self) {
+        self.send_command(Command::ReloadGrammar);
     }
 }
 
@@ -262,7 +281,7 @@ fn inference_thread(
     let mut context = Context::new(model.clone(), &parameters.context);
     let batch_size = parameters
         .batch_size
-        .unwrap_or(parameters.context.n_batch_max as _);
+        .unwrap_or(parameters.context.n_batch_max);
     let mut decoder = Decoder::new(&mut context, batch_size);
     let mut sampler = Sampler::new(parameters.sampling);
 
@@ -285,17 +304,12 @@ fn inference_thread(
                 let parameters = parameters.unwrap_or_else(|| sampler.parameters().clone());
                 sampler = Sampler::new(parameters);
             }
-            Command::Sample {
-                max_tokens,
-                stop_tokens,
-                tx,
-                lock_step,
-            } => {
+            Command::Sample { tx, options } => {
                 let mut i: usize = 0;
 
                 loop {
-                    let sampled = match decoder.sample_and_decode(&mut sampler) {
-                        Ok(sampled) => sampled,
+                    let token = match decoder.sample_and_decode(&mut sampler) {
+                        Ok(token) => token,
                         Err(e) => {
                             // an error occured.
                             tx.blocking_send(SampleStreamItem::Error(e)).ok();
@@ -303,20 +317,15 @@ fn inference_thread(
                         }
                     };
 
-                    if let Some(warning) = sampled.warning {
-                        // send warning to stream
-                        tx.blocking_send(SampleStreamItem::Warning(warning)).ok();
-                    }
-
                     // eos, so we stop
-                    if sampled.token == model.token_eos() {
+                    if token == model.token_eos() {
                         break;
                     }
 
-                    let token = sampled.token;
-
                     // if we found a stop token, we stop.
-                    if stop_tokens.contains(&token) {
+                    // we could make the stop tokens a `HashSet`, but we don't think it's really
+                    // worth it.
+                    if options.stop_tokens.contains(&token) {
                         tx.blocking_send(SampleStreamItem::Stop {
                             reason: StopReason::StopToken(token),
                         })
@@ -325,7 +334,7 @@ fn inference_thread(
                     }
 
                     // create tx_continue if we run in lock-step mode
-                    let (tx_continue, rx_continue) = if lock_step {
+                    let (tx_continue, rx_continue) = if options.lock_step {
                         let (rx, tx) = oneshot::channel();
                         (Some(rx), Some(tx))
                     }
@@ -343,7 +352,7 @@ fn inference_thread(
                     }
 
                     // if we're in lock-step mode we wait for the ShouldContinue to arrive.
-                    if lock_step {
+                    if options.lock_step {
                         let rx = rx_continue
                             .expect("sampling in lock-step mode, but rx_continue is None");
                         match rx.blocking_receive() {
@@ -363,7 +372,7 @@ fn inference_thread(
                     i += 1;
 
                     // if max_tokens is not None and we reached it, we stop.
-                    if max_tokens.map(|m| i >= m).unwrap_or_default() {
+                    if options.max_tokens.map(|m| i >= m).unwrap_or_default() {
                         tx.blocking_send(SampleStreamItem::Stop {
                             reason: StopReason::MaxTokens(i),
                         })
@@ -371,6 +380,14 @@ fn inference_thread(
                         break;
                     }
                 }
+
+                // reset grammar
+                if options.reload_grammar {
+                    sampler.reload_grammar()
+                }
+            }
+            Command::ReloadGrammar => {
+                sampler.reload_grammar();
             }
         }
     }
@@ -387,11 +404,10 @@ enum Command {
         parameters: Option<SamplingParameters>,
     },
     Sample {
-        max_tokens: Option<usize>,
-        stop_tokens: HashSet<Token>,
         tx: mpsc::bounded::Sender<SampleStreamItem>,
-        lock_step: bool,
+        options: SamplingOptions,
     },
+    ReloadGrammar,
 }
 
 /// The reason why the LLM output was stopped.
@@ -422,7 +438,6 @@ enum SampleStreamItem {
         token: Token,
         tx_continue: Option<oneshot::Sender<ShouldContinue>>,
     },
-    Warning(DecodeWarning),
     Error(crate::backend::Error),
 }
 
@@ -443,9 +458,6 @@ pub struct TokenStream<'session> {
     /// if in lock-step mode, this is the sender we have to use to continue the
     /// stream. it also allows us to stop the sampling after each token.
     tx_continue: Option<oneshot::Sender<ShouldContinue>>,
-
-    /// The last warning we received
-    warning: Option<DecodeWarning>,
 }
 
 impl<'session> TokenStream<'session> {
@@ -505,9 +517,6 @@ impl<'session> TokenStream<'session> {
                     // the stream was also terminated by the session thread. we
                     // set this as stop reason.
                 }
-                SampleStreamItem::Warning(_) => {
-                    // i think we can just ignore any warnings here.
-                }
                 SampleStreamItem::Error(e) => {
                     // the session thread encountered an error.
                     return Err(e.into());
@@ -553,11 +562,6 @@ impl<'session> TokenStream<'session> {
             token_decoder,
         }
     }
-
-    /// Returns the last decode warning received from the llama.cpp backend.
-    pub fn warning(&self) -> Option<DecodeWarning> {
-        self.warning
-    }
 }
 
 impl<'session> Stream for TokenStream<'session> {
@@ -570,34 +574,21 @@ impl<'session> Stream for TokenStream<'session> {
 
         if let Some(rx) = &mut self.rx {
             pin_mut!(rx);
-            let mut last_warning = None;
 
-            let poll = loop {
-                let next = rx.as_mut().poll_next(cx);
-
+            rx.as_mut().poll_next(cx).map(|next| {
                 match next {
-                    Poll::Ready(Some(SampleStreamItem::Token { token, tx_continue })) => {
+                    Some(SampleStreamItem::Token { token, tx_continue }) => {
                         self.tx_continue = tx_continue;
-                        break Poll::Ready(Some(Ok(token)));
+                        Some(Ok(token))
                     }
-                    Poll::Ready(Some(SampleStreamItem::Stop { reason })) => {
+                    Some(SampleStreamItem::Stop { reason }) => {
                         self.stop_reason = Some(reason);
-                        break Poll::Ready(None);
+                        None
                     }
-                    Poll::Ready(Some(SampleStreamItem::Warning(warning))) => {
-                        last_warning = Some(warning);
-                        // poll another item after this
-                    }
-                    Poll::Ready(Some(SampleStreamItem::Error(e))) => {
-                        break Poll::Ready(Some(Err(e.into())))
-                    }
-                    Poll::Ready(None) => break Poll::Ready(None),
-                    Poll::Pending => break Poll::Pending,
+                    Some(SampleStreamItem::Error(e)) => Some(Err(e.into())),
+                    None => None,
                 }
-            };
-
-            last_warning.map(|w| self.warning = Some(w));
-            poll
+            })
         }
         else {
             Poll::Ready(None)
@@ -653,11 +644,6 @@ impl<'session> PieceStream<'session> {
     pub fn into_tokens(self) -> TokenStream<'session> {
         self.token_stream
     }
-
-    /// Returns the last decode warning received from the llama.cpp backend.
-    pub fn warning(&self) -> Option<DecodeWarning> {
-        self.token_stream.warning()
-    }
 }
 
 impl<'session> Stream for PieceStream<'session> {
@@ -690,5 +676,70 @@ impl<'session> Stream for PieceStream<'session> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::stream::StreamExt;
+
+    use super::*;
+    use crate::{
+        backend::grammar::Compiled as Grammar,
+        utils::test::model,
+    };
+
+    fn inference(grammar: Option<Grammar>) -> Inference {
+        model().inference(InferenceParameters {
+            context: ContextParameters {
+                seed: 1234.into(),
+                ..Default::default()
+            },
+            sampling: SamplingParameters {
+                grammar,
+                ..Default::default()
+            },
+            batch_size: None,
+        })
+    }
+
+    #[cfg(all(feature = "grammar", feature = "runtime-tokio"))]
+    #[tokio::test]
+    async fn it_reloads_the_grammar() {
+        use crate::grammar::parse_and_compile;
+
+        let grammar = parse_and_compile("root ::= \"Hello World\"").unwrap();
+        let mut inference = inference(Some(grammar));
+
+        inference
+            .push_text("Hello World", true, false)
+            .await
+            .unwrap();
+
+        let output = inference
+            .pieces(Default::default())
+            .map(|result| result.unwrap())
+            .collect::<String>()
+            .await;
+        assert_eq!(output, "Hello World");
+
+        // grammar was at end, but should have been reloaded.
+        let output = inference
+            .pieces(SamplingOptions {
+                reload_grammar: false,
+                ..Default::default()
+            })
+            .map(|result| result.unwrap())
+            .collect::<String>()
+            .await;
+        assert_eq!(output, "Hello World");
+
+        // grammar is at end now, so we should get an empty string
+        let output = inference
+            .pieces(Default::default())
+            .map(|result| result.unwrap())
+            .collect::<String>()
+            .await;
+        assert_eq!(output, "");
     }
 }

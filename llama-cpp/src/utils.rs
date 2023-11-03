@@ -23,7 +23,10 @@ pub mod test {
     use std::cell::OnceCell;
 
     use crate::backend::{
-        context::{Context, ContextParameters},
+        context::{
+            Context,
+            ContextParameters,
+        },
         model::Model,
     };
 

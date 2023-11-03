@@ -197,6 +197,9 @@ pub enum Error {
     #[error("model decode failed")]
     DecodeError,
 
+    #[error("kv cache full")]
+    KvCacheFull,
+
     /// Incorrect UTF-8 encoding of `&str`
     #[error("utf-8 error")]
     StrUtf8Error(#[from] std::str::Utf8Error),

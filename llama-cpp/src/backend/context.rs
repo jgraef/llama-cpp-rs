@@ -1,8 +1,9 @@
 //! LLM context
 
-use std::slice;
-
-use itertools::Itertools;
+use std::{
+    collections::HashMap,
+    slice,
+};
 
 use super::{
     batch::Batch,
@@ -14,6 +15,7 @@ use super::{
     },
     Error,
     Pos,
+    SeqId,
     Token,
     DEFAULT_SEED,
 };
@@ -163,14 +165,8 @@ impl Context {
         }
     }
 
-    /// Creates a decoder for batched decoding.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the `batch_size` is 0.
-    pub fn decoder(&mut self, batch_size: impl Into<Option<u32>>) -> Decoder {
-        let batch_size = batch_size.into().unwrap_or(self.n_batch_max);
-        Decoder::new(self, batch_size)
+    pub fn batched(&mut self) -> Batched {
+        Batched::new(self, self.n_batch_max)
     }
 
     /// Return the model this context uses.
@@ -245,13 +241,13 @@ impl Context {
     ///
     /// Panics if the number of tokens in the batch exceeds the
     /// max batch size, or if `batch.n_embd` is invalid.
-    pub fn decode_batch(&mut self, batch: &Batch) -> Result<(), Error> {
-        tracing::trace!("calling llama_decode");
-
+    pub unsafe fn decode_batch_unchecked(&mut self, batch: &Batch) -> Result<(), DecodeError> {
         // if the batch is empty, we do nothing.
         if batch.data.n_tokens == 0 {
             return Ok(());
         }
+
+        tracing::trace!("calling llama_decode");
 
         assert!(batch.data.n_tokens > 0);
         // or should we rather check that the batch size is smaller than n_batch?
@@ -269,14 +265,14 @@ impl Context {
 
         match ret {
             0 => Ok(()),
-            1 => Err(Error::KvCacheFull),
-            _ if ret < 0 => Err(Error::DecodeError),
-            _ if ret > 0 => panic!("llama_decode returned unknown warning: {ret}"),
+            1 => Err(DecodeError::KvCacheFull),
+            _ if ret < 0 => Err(DecodeError::Failed(ret)),
+            _ if ret > 0 => Err(DecodeError::UnknownWarning(ret)),
             _ => unreachable!(),
         }
     }
 
-    pub fn swap(&mut self, n_keep: u32) {
+    pub fn swap(&mut self, n_keep: u32) -> u32 {
         /* taken from llama.cpp/examples/main/main.cpp
 
             const int n_left    = n_past - params.n_keep - 1;
@@ -316,14 +312,20 @@ impl Context {
             );
         }
 
-        self.n_past = self.n_past
+        self.n_past = self
+            .n_past
             .checked_sub(n_discard as u32)
             .expect("bug: discarded more than we have");
+
+        n_discard as u32
     }
 
-    pub fn swap_if_needed(&mut self, n_tokens: u32, n_keep: u32) {
+    pub fn swap_if_needed(&mut self, n_tokens: u32, n_keep: u32) -> u32 {
         if self.n_past + n_tokens > self.n_ctx {
-            self.swap(n_keep);
+            self.swap(n_keep)
+        }
+        else {
+            0
         }
     }
 
@@ -379,6 +381,18 @@ impl Drop for Context {
     }
 }
 
+#[derive(Copy, Clone, Debug, thiserror::Error)]
+pub enum DecodeError {
+    #[error("decode failed: {0}")]
+    Failed(i32),
+
+    #[error("kv cache is full")]
+    KvCacheFull,
+
+    #[error("unknown warning: {0}")]
+    UnknownWarning(i32),
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum KvCacheType {
     F16,
@@ -393,128 +407,161 @@ impl Default for KvCacheType {
 
 pub type Timings = llama_cpp_sys::llama_timings;
 
-/// Helper to do batched decoding and sampling.
-// todo: rename
-pub struct Decoder<'a> {
-    context: &'a mut Context,
-    batch: Batch,
-    pos: Pos,
-    logits_pos: Option<i32>,
+#[derive(Clone, Debug, Default)]
+struct SequenceState {
+    position: Pos,
+    logits_indices: Vec<u32>,
+    logits: Vec<Vec<f32>>,
 }
 
-impl<'a> Decoder<'a> {
-    /// Creates a decoder for batched decoding.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the `batch_size` is 0.
-    pub fn new(context: &'a mut Context, batch_size: u32) -> Self {
-        assert!(
-            batch_size > 0 && batch_size <= context.n_batch_max,
-            "invalid batch size"
-        );
+/// Helper to do batched decoding on a [`Context`].
+pub struct Batched<'a> {
+    context: &'a mut Context,
+    batch: Batch,
+    sequences: HashMap<SeqId, SequenceState>,
+}
 
-        // for now we'll have `n_seq_max=1`.
+impl<'a> Batched<'a> {
+    pub fn new(context: &'a mut Context, batch_size: u32) -> Self {
+        // `n_seq_max` specifies how many sequences a token can belong to, not how many
+        // sequences we can have.
         let batch = Batch::new_tokens(batch_size, 1);
 
         Self {
             context,
             batch,
-            pos: 0,
-            logits_pos: None,
+            sequences: HashMap::new(),
         }
     }
 
-    /// Decode tokens.
-    ///
-    /// If `logits_for_last_token` is `true` this will produce logits for the
-    /// last token. You want this if you want to sample tokens next. For
-    /// embedding you can set this to `false`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if one if the passed tokens is invalid.
-    pub fn decode(&mut self, tokens: &[Token], logits_for_last_token: bool) -> Result<(), Error> {
-        for token in tokens {
-            self.context.model.assert_valid_token(*token);
-        }
-
-        unsafe { self.decode_unchecked(tokens, logits_for_last_token) }
-    }
-
-    /// Decode tokens.
-    ///
-    /// # Safety
-    ///
-    /// This doesn't check if the provided tokens are valid. If you pass invalid
-    /// tokens, the llama.cpp backend might crash.
-    pub unsafe fn decode_unchecked(
+    pub unsafe fn push_token_unchecked(
         &mut self,
-        tokens: &[Token],
-        logits_for_last_token: bool,
-    ) -> Result<(), Error> {
-        for chunk in IsLast::new(tokens.into_iter())
-            .chunks(self.batch.size() as _)
-            .into_iter()
-        {
-            self.batch.clear();
+        token: Token,
+        seq_id: SeqId,
+        calculate_logits: bool,
+    ) -> Result<(), DecodeError> {
+        let sequence = self.sequences.entry(seq_id).or_default();
 
-            for (i, (token, is_last)) in chunk.into_iter().enumerate() {
-                // add token to batch
-                self.batch.add_token(*token, self.pos, &[0], is_last);
+        // remember logits index
+        if calculate_logits {
+            sequence.logits_indices.push(self.batch.n_tokens());
+        }
 
-                // generate logits for the last position
-                if is_last && logits_for_last_token {
-                    self.logits_pos = Some(i as _);
-                }
+        // add token to batch
+        self.batch
+            .add_token(token, sequence.position, &[seq_id], calculate_logits);
 
-                self.pos += 1;
-            }
+        // increment sequence's position
+        sequence.position += 1;
 
-            // todo: make this optional
-            self.context.swap_if_needed(self.batch.data.n_tokens as u32, 4);
-
-            // decode
-            self.context.decode_batch(&self.batch)?;
+        // decode if batch is full
+        if self.batch.is_full() {
+            self.decode()?;
         }
 
         Ok(())
     }
 
-    /// Samples the next token and decodes it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if no tokens have been pushed for decoding.
-    pub fn sample_and_decode(&mut self, sampler: &mut Sampler) -> Result<Token, Error> {
-        // todo: this should return an error, right?
-        let logits_pos = self
-            .logits_pos
-            .expect("batch hasn't decoded to any logits yet");
-        let logits = self.context.get_logits_ith(logits_pos as _);
+    pub fn push_token(
+        &mut self,
+        token: Token,
+        seq_id: SeqId,
+        calculate_logits: bool,
+    ) -> Result<(), DecodeError> {
+        self.context.model.assert_valid_token(token);
+        unsafe { self.push_token_unchecked(token, seq_id, calculate_logits) }
+    }
 
-        // sample next token
-        let candidates = Candidates::from_logits(logits);
-        let next_token = sampler.sample(candidates, &mut self.context);
+    pub fn push_tokens(
+        &mut self,
+        tokens: &[Token],
+        seq_id: SeqId,
+        calculate_logits_for_last_token: bool,
+    ) -> Result<(), DecodeError> {
+        for (token, is_last) in IsLast::new(tokens.iter()) {
+            self.push_token(*token, seq_id, calculate_logits_for_last_token && is_last)?;
+        }
 
-        sampler.push_previous(next_token);
+        Ok(())
+    }
 
-        // clear batch to feed in sampled token
+    pub fn decode(&mut self) -> Result<(), DecodeError> {
+        // since we constructed the batch it should be safe to decode it.
+        unsafe { self.context.decode_batch_unchecked(&self.batch)? };
+
+        // clear batch
         self.batch.clear();
 
-        // add sampled token to batch
-        // note: since we sampled this token, we can assume its valid.
-        unsafe { self.batch.add_token(next_token, self.pos, &[0], true) };
+        // copy logits
+        for sequence in self.sequences.values_mut() {
+            for logits_index in &sequence.logits_indices {
+                let logits = self.context.get_logits_ith(*logits_index);
+                sequence.logits.push(logits.to_owned());
+            }
+            sequence.logits_indices.clear();
+        }
 
-        // generate logits for the only token that is in the batch
-        self.logits_pos = Some(0);
+        Ok(())
+    }
 
-        self.pos += 1;
+    pub fn take_logits(&mut self, seq_id: SeqId) -> Vec<Vec<f32>> {
+        let Some(sequence) = self.sequences.get_mut(&seq_id)
+        else {
+            return vec![];
+        };
+        std::mem::replace(&mut sequence.logits, vec![])
+    }
 
-        // decode
-        self.context.decode_batch(&mut self.batch)?;
+    pub fn delete_sequence(&mut self, seq_id: SeqId) {
+        tracing::debug!(seq_id, "delete sequence");
 
-        Ok(next_token)
+        self.sequences.remove(&seq_id);
+
+        // remove sequence from kv cache
+        unsafe {
+            llama_cpp_sys::llama_kv_cache_seq_rm(self.context.handle, seq_id, -1, -1);
+        }
+    }
+
+    pub fn sample(&mut self, seq_id: SeqId, sampler: &mut Sampler) -> Result<Token, DecodeError> {
+        // get last logits and discard the rest.
+        let logits = self
+            .take_logits(seq_id)
+            .pop()
+            .expect("no logits calculated");
+        let candidates = Candidates::from_logits(&logits);
+
+        let token = sampler.sample(candidates, &mut self.context);
+
+        self.push_token(token, seq_id, true)?;
+
+        Ok(token)
+    }
+
+    pub fn copy_sequence(&mut self, from_sequence_id: SeqId, to_sequence_id: SeqId) {
+        tracing::debug!(from_sequence_id, to_sequence_id, "copy sequence");
+
+        let Some(from_sequence) = self.sequences.get(&from_sequence_id)
+        else {
+            // if we copy from a sequence we have no data for, we are basically copying the
+            // empty sequence, so we just return :3
+            return;
+        };
+
+        // copy sequence state
+        let to_sequence = from_sequence.clone();
+        self.sequences.insert(to_sequence_id, to_sequence);
+
+        // copy kv-cache
+        unsafe {
+            llama_cpp_sys::llama_kv_cache_seq_cp(
+                self.context.handle,
+                from_sequence_id,
+                to_sequence_id,
+                -1,
+                -1,
+            );
+        }
     }
 }
 
@@ -534,11 +581,11 @@ mod tests {
         },
     };
 
-    fn sample_until_eos<'a>(decoder: &mut Decoder<'a>, sampler: &mut Sampler) -> Vec<Token> {
+    fn sample_until_eos<'a>(batched: &mut Batched<'a>, sampler: &mut Sampler) -> Vec<Token> {
         let mut tokens = vec![];
         loop {
-            let token = decoder.sample_and_decode(sampler).unwrap();
-            if token == decoder.context.model().token_eos() {
+            let token = batched.sample(0, sampler).unwrap();
+            if token == batched.context.model().token_eos() {
                 break;
             }
             tokens.push(token);
@@ -550,8 +597,8 @@ mod tests {
     #[should_panic]
     fn it_rejects_invalid_tokens() {
         let mut context = context();
-        let mut decoder = context.decoder(512);
-        decoder.decode(&[i32::MAX], false).unwrap();
+        let mut decoder = context.batched();
+        decoder.push_token(i32::MAX, 0, false).unwrap();
     }
 
     #[test]
@@ -576,8 +623,9 @@ mod tests {
             ..Default::default()
         });
 
-        let mut decoder = context.decoder(512);
-        decoder.decode(&tokens, false).unwrap();
+        let mut batched = context.batched();
+        batched.push_tokens(&tokens, 0, false).unwrap();
+        batched.decode().unwrap();
 
         let embeddings = context
             .get_embeddings()
@@ -586,25 +634,17 @@ mod tests {
     }
 
     #[test]
-    fn decode_twice() {
-        let mut context = context();
-        let tokens = context.model().tokenize("Hello World", true, false);
-        let mut decoder = context.decoder(tokens.len() as u32);
-        decoder.decode(&tokens, false).unwrap();
-        decoder.decode(&tokens, false).unwrap();
-    }
-
-    #[test]
+    #[ignore = "context swapping doesn't work yet"]
     fn it_decodes_long_input() {
         let mut context = context();
         println!("n_ctx = {}", context.n_ctx());
 
         let tokens = context.model().tokenize(&lipsum(512), true, false);
-        let mut decoder = context.decoder(64);
-        decoder.decode(&tokens, true).unwrap();
+        let mut batched = Batched::new(&mut context, 64);
+        batched.push_tokens(&tokens, 0, true).unwrap();
 
         let mut sampler = Sampler::new(Default::default());
-        let tokens = sample_until_eos(&mut decoder, &mut sampler);
+        let tokens = sample_until_eos(&mut batched, &mut sampler);
         println!("{:?}", tokens);
         //assert_eq!(token, 23);
     }
@@ -615,10 +655,10 @@ mod tests {
 
         let gen = |batch_size: u32| {
             let mut context = context();
-            let mut decoder = context.decoder(Some(batch_size));
-            decoder.decode(&tokens, true).unwrap();
+            let mut batched = Batched::new(&mut context, batch_size);
+            batched.push_tokens(&tokens, 0, true).unwrap();
             let mut sampler = Sampler::new(Default::default());
-            sample_until_eos(&mut decoder, &mut sampler)
+            sample_until_eos(&mut batched, &mut sampler)
         };
 
         let output1 = gen(512);

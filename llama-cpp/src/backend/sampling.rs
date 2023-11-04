@@ -49,7 +49,7 @@ impl Default for SamplingParameters {
     fn default() -> Self {
         Self {
             mode: Default::default(),
-            repetition_penalties: None,
+            repetition_penalties: Some(Default::default()),
             grammar: None,
         }
     }
@@ -142,8 +142,15 @@ impl Buffer {
 
     pub fn push(&mut self, token: Token) {
         self.tokens.push_back(token);
-        while self.tokens.len() > self.buf_size {
+        if self.tokens.len() > self.buf_size {
             self.tokens.pop_front();
+        }
+    }
+
+    pub fn push_all(&mut self, tokens: &[Token]) {
+        let tokens = &tokens[tokens.len().saturating_sub(self.buf_size)..];
+        for token in tokens {
+            self.push(*token);
         }
     }
 
@@ -358,7 +365,7 @@ impl Sampler {
         };
 
         // feed token into previous token accumulator
-        self.push_previous(token);
+        self.push_previous(&[token]);
 
         // feed token into grammar
         //
@@ -374,10 +381,10 @@ impl Sampler {
         token
     }
 
-    /// Push a token into the previous token buffer.
-    pub fn push_previous(&mut self, token: Token) {
+    /// Push tokens into the previous token buffer.
+    pub fn push_previous(&mut self, tokens: &[Token]) {
         if let Some(token_buf) = &mut self.token_buf {
-            token_buf.push(token);
+            token_buf.push_all(tokens);
         }
     }
 
@@ -389,6 +396,12 @@ impl Sampler {
             .grammar
             .as_ref()
             .map(|grammar| grammar.load());
+    }
+}
+
+impl Default for Sampler {
+    fn default() -> Self {
+        Self::new(Default::default())
     }
 }
 

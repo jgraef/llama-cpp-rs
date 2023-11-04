@@ -5,7 +5,7 @@
 //! Low-level synchronous bindings can be found in the [`backend`] module.
 //!
 //! It's recommend to use the high-level asynchronous interfaces found in
-//! [`loader`] and [`inference`].
+//! [`loader`] and [`session`].
 //!
 //! # Async Runtime
 //!
@@ -16,13 +16,13 @@
 //!  - `runtime-tokio`
 //!
 //! This will automatically enable the `async` feature, which enables the
-//! [`loader`] and [`inference`] module.
+//! [`loader`] and [`session`] module.
 //!
 //! # Example
 //!
 //! ```
 //! # use std::io::{stdout, Write};
-//! # use llama_cpp::{loader::ModelLoader, Error};
+//! # use llama_cpp::{loader::ModelLoader, Error, token::Tokenize, session::Session};
 //! # use futures::{stream::TryStreamExt, pin_mut};
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Error> {
@@ -37,12 +37,21 @@
 //! print!("{}", prompt);
 //! stdout().flush()?;
 //!
-//! // create an inference session and feed prompt to it
-//! let mut inference = model.inference(Default::default());
-//! inference.push_text(prompt, true, false).await?;
+//! // create an inference session.
+//! let session = Session::from_model(model, Default::default());
+//!
+//! // create a sequence and feed prompt to it.
+//! let mut sequence = session.sequence();
+//! sequence
+//!     .push(Tokenize {
+//!         text: prompt,
+//!         add_bos: true,
+//!         allow_special: false,
+//!     })
+//!     .await?;
 //!
 //! // create a response stream from it
-//! let stream = inference.pieces(Default::default());
+//! let stream = inference.stream::<String>(Default::default());
 //! pin_mut!(stream);
 //!
 //! // stream LLM output piece by piece
@@ -58,6 +67,8 @@
 //! [2]: https://tokio.rs/
 //! [3]: https://async.rs/
 
+use backend::context::DecodeError;
+
 #[cfg(feature = "async")]
 mod async_rt;
 pub mod backend;
@@ -66,10 +77,11 @@ pub mod backend;
 pub mod grammar;
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 #[cfg(feature = "async")]
-pub mod inference;
+pub mod loader;
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 #[cfg(feature = "async")]
-pub mod loader;
+pub mod session;
+pub mod token;
 mod utils;
 
 #[derive(Debug, thiserror::Error)]
@@ -83,4 +95,10 @@ pub enum Error {
     #[cfg(feature = "grammar")]
     #[error("grammar error")]
     Grammar(#[from] crate::grammar::Error),
+}
+
+impl From<DecodeError> for Error {
+    fn from(error: DecodeError) -> Self {
+        Self::Backend(error.into())
+    }
 }

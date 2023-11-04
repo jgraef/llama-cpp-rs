@@ -96,6 +96,8 @@ use std::{
     },
 };
 
+use self::context::DecodeError;
+
 /// Max number of devices that can be used to split a tensor computations in
 /// between.
 ///
@@ -195,10 +197,7 @@ pub enum Error {
 
     /// Decoder error
     #[error("model decode failed")]
-    DecodeError,
-
-    #[error("kv cache full")]
-    KvCacheFull,
+    DecodeError(#[from] DecodeError),
 
     /// Incorrect UTF-8 encoding of `&str`
     #[error("utf-8 error")]

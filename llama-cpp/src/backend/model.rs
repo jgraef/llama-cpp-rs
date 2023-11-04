@@ -206,7 +206,7 @@ impl Model {
         tracing::trace!(text, "tokenize");
 
         // this is exactly how llama.cpp/common.cpp does it
-        let token_count = text.len() + if add_bos { 1 } else { 0 };
+        let token_count = text.len() + add_bos.then_some(1).unwrap_or_default();
 
         let text_len = text.len() as i32;
         let text = text.as_ptr() as _;
@@ -321,20 +321,6 @@ impl Model {
     /// Returns if the token is valid for this model.
     pub fn is_valid_token(&self, token: Token) -> bool {
         token >= 0 && token < self.inner.n_vocab
-    }
-
-    /// Creates a new inference session.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inference parameters are invalid.
-    #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    #[cfg(feature = "async")]
-    pub fn inference(
-        &self,
-        parameters: crate::inference::InferenceParameters,
-    ) -> crate::inference::Inference {
-        crate::inference::Inference::new(self.clone(), parameters)
     }
 }
 

@@ -16,11 +16,15 @@ use futures::{
 use llama_cpp::{
     backend::{
         grammar::Compiled,
-        sampling::SamplingParameters,
+        sampling::{
+            Sampler,
+            SamplingParameters,
+        },
     },
     grammar::compiler::Buffer,
-    inference::InferenceParameters,
     loader::ModelLoader,
+    session::Session,
+    token::Tokenize,
 };
 
 #[tokio::main]
@@ -50,6 +54,11 @@ async fn main() -> Result<(), Error> {
         rules: vec![rule1.elements, rule2.elements],
     };
 
+    let sampling_parameters = SamplingParameters {
+        grammar: Some(grammar),
+        ..Default::default()
+    };
+
     // load model asynchronously
     let model_path = "../../data/TinyLLama-v0.gguf";
     let model = ModelLoader::load(&model_path, Default::default())
@@ -57,19 +66,20 @@ async fn main() -> Result<(), Error> {
         .await?;
 
     // create an inference session
-    let mut inference = model.inference(InferenceParameters {
-        sampling: SamplingParameters {
-            grammar: Some(grammar),
-            ..Default::default()
-        },
-        ..Default::default()
-    });
+    let session = Session::from_model(model, &Default::default());
+    let mut sequence = session.sequence();
 
     // feed prompt to it.
-    inference.push_text("Once upon a time", true, false).await?;
+    sequence
+        .push(Tokenize {
+            text: "Once upon a time",
+            add_bos: true,
+            allow_special: false,
+        })
+        .await?;
 
     // create a response stream from it
-    let stream = inference.pieces(Default::default());
+    let stream = sequence.stream::<String>(Sampler::new(sampling_parameters));
     pin_mut!(stream);
 
     // stream LLM output piece by piece

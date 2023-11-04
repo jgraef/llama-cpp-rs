@@ -9,20 +9,22 @@ use std::{
 use color_eyre::eyre::Error;
 use futures::{
     pin_mut,
+    StreamExt,
     TryStreamExt,
 };
 use inquire::InquireError;
 use llama_cpp::{
     backend::{
         context::ContextParameters,
-        sampling::SamplingParameters,
+        sampling::{
+            Sampler,
+            SamplingParameters,
+        },
         system_info,
     },
-    inference::{
-        Inference,
-        InferenceParameters,
-    },
     loader::ModelLoader,
+    session::Session,
+    token::Tokenize,
 };
 use structopt::StructOpt;
 
@@ -39,31 +41,36 @@ struct ModelOptions {
 }
 
 impl ModelOptions {
-    async fn inference(&self) -> Result<Inference, Error> {
-        let grammar = self
-            .grammar
-            .as_ref()
-            .map(|path| llama_cpp::grammar::compile_from_source(path))
-            .transpose()?;
-
-        let inference_parameters = InferenceParameters {
-            context: ContextParameters {
-                seed: self.seed,
-                n_ctx: Some(512),
-                ..Default::default()
-            },
-            sampling: SamplingParameters {
-                grammar,
-                ..Default::default()
-            },
-            batch_size: Some(64),
+    async fn session(&self) -> Result<Session, Error> {
+        let context_parameters = ContextParameters {
+            seed: self.seed,
+            n_ctx: Some(512),
+            ..Default::default()
         };
 
         let model = ModelLoader::load(&self.model, Default::default())
             .wait_for_model()
             .await?;
 
-        Ok(model.inference(inference_parameters))
+        let context = model.context(&context_parameters);
+
+        let session = Session::from_context(context);
+
+        Ok(session)
+    }
+
+    fn sampler(&self) -> Result<Sampler, Error> {
+        let grammar = self
+            .grammar
+            .as_ref()
+            .map(|path| llama_cpp::grammar::compile_from_source(path))
+            .transpose()?;
+
+        let sampling_parameters = SamplingParameters {
+            grammar,
+            ..Default::default()
+        };
+        Ok(Sampler::new(sampling_parameters))
     }
 }
 
@@ -72,6 +79,9 @@ enum Args {
     Generate {
         #[structopt(flatten)]
         model_options: ModelOptions,
+
+        #[structopt(long)]
+        parallel: Option<usize>,
 
         prompt: String,
     },
@@ -91,9 +101,10 @@ impl Args {
         match self {
             Self::Generate {
                 model_options,
+                parallel,
                 prompt,
             } => {
-                generate(model_options, &prompt).await?;
+                generate(&prompt, model_options, parallel).await?;
             }
             Self::Chat { model_options } => {
                 chat(model_options).await?;
@@ -121,29 +132,92 @@ impl Args {
     }
 }
 
-async fn generate(model_options: ModelOptions, prompt: &str) -> Result<(), Error> {
-    let mut inference = model_options.inference().await?;
+async fn generate(
+    prompt: &str,
+    model_options: ModelOptions,
+    parallel: Option<usize>,
+) -> Result<(), Error> {
+    let session = model_options.session().await?;
+    let sampler = model_options.sampler()?;
 
-    print!("{}", prompt);
-    stdout().flush()?;
-
-    inference.push_text(&prompt, true, false).await?;
-
-    let stream = inference.pieces(Default::default());
-    pin_mut!(stream);
-
-    while let Some(piece) = stream.try_next().await? {
-        print!("{piece}");
-        stdout().flush()?;
+    let parallel = parallel.unwrap_or(1);
+    if parallel == 0 {
+        return Ok(());
     }
 
-    println!("");
+    if parallel == 1 {
+        print!("{prompt}");
+        stdout().flush()?;
+    }
+    else {
+        println!("{prompt} ... generating");
+    }
+
+    // create sequence and feed prompt to it.
+    let sequence = session.sequence();
+    sequence
+        .push(Tokenize {
+            text: &prompt,
+            add_bos: true,
+            allow_special: false,
+        })
+        .await?;
+
+    // split sequence
+    let mut sequences = (1..parallel).map(|_| sequence.clone()).collect::<Vec<_>>();
+    sequences.push(sequence);
+
+    // sample in parallel
+    let mut join_handles = sequences
+        .into_iter()
+        .map(|mut sequence| {
+            let sampler = sampler.clone();
+
+            tokio::spawn(async move {
+                let mut output = String::new();
+
+                let stream = sequence.stream::<String>(sampler);
+                pin_mut!(stream);
+
+                while let Some(piece) = stream.try_next().await? {
+                    if parallel == 1 {
+                        print!("{piece}");
+                        stdout().flush()?;
+                    }
+                    else {
+                        output.push_str(&piece);
+                    }
+                }
+
+                Ok::<_, Error>(output)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if parallel == 1 {
+        join_handles.pop().unwrap().await??;
+        println!("");
+    }
+    else {
+        let outputs = futures::stream::iter(join_handles)
+            .then(|r| async { r.await.unwrap() })
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        for (i, output) in outputs.iter().enumerate() {
+            println!("Output #{}:", i + 1);
+            println!("{output}");
+            println!("");
+        }
+    }
 
     Ok(())
 }
 
 async fn chat(model_options: ModelOptions) -> Result<(), Error> {
-    let mut inference = model_options.inference().await?;
+    let session = model_options.session().await?;
+    let sampler = model_options.sampler()?;
+    let mut sequence = session.sequence();
     let mut is_first = true;
 
     loop {
@@ -153,9 +227,15 @@ async fn chat(model_options: ModelOptions) -> Result<(), Error> {
             Err(e) => return Err(e.into()),
         };
 
-        inference.push_text(&text, is_first, true).await?;
+        sequence
+            .push(Tokenize {
+                text: &text,
+                add_bos: is_first,
+                allow_special: false,
+            })
+            .await?;
 
-        let stream = inference.pieces(Default::default());
+        let stream = sequence.stream::<String>(sampler.clone());
         pin_mut!(stream);
 
         while let Some(piece) = stream.try_next().await? {

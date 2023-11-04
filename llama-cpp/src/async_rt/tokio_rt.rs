@@ -83,10 +83,8 @@ pub mod oneshot {
 }
 
 pub mod mpsc {
-    use super::{
-        super::shared::mpsc::TryReceiveError,
-        *,
-    };
+    pub use super::super::shared::mpsc::TryReceiveError;
+    use super::*;
 
     impl From<tokio::sync::mpsc::error::TryRecvError> for TryReceiveError {
         fn from(e: tokio::sync::mpsc::error::TryRecvError) -> Self {
@@ -100,12 +98,18 @@ pub mod mpsc {
     pub mod unbounded {
         use super::*;
 
-        #[derive(Clone, Debug)]
+        #[derive(Debug)]
         pub struct Sender<T>(tokio::sync::mpsc::UnboundedSender<T>);
 
         impl<T> Sender<T> {
             pub fn send(&self, value: T) -> Result<(), T> {
                 self.0.send(value).map_err(|e| e.0)
+            }
+        }
+
+        impl<T> Clone for Sender<T> {
+            fn clone(&self) -> Self {
+                Sender(self.0.clone())
             }
         }
 

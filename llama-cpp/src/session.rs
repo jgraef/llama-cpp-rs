@@ -8,8 +8,8 @@
 //! Both [`Sequence::push`] and [`Sequence::stream`] can work with strings or
 //! tokens. Take a look at the [`token`](crate::token) module for the relevant
 //! for traits and their implementors. For example [`Sequence::push`] also
-//! accepts the [`Tokenize`](crate::token::Tokenize) struct, which gives you more control over how the
-//! text is tokenized.
+//! accepts the [`Tokenize`](crate::token::Tokenize) struct, which gives you
+//! more control over how the text is tokenized.
 //!
 //! [`Sequence`]s can be cloned. Internally this will tell the [`Context`] to
 //! copy the sequence's KV cache and other important state. It behaves as if
@@ -97,37 +97,6 @@ use crate::{
     utils::IsLast,
     Error,
 };
-
-/// Options for sampling a single response.
-///
-/// See also: [`SamplingParameters`].
-#[derive(Clone, Debug)]
-#[deprecated]
-struct SamplingOptions {
-    /// Number of tokens to sample, or None if unlimited. Default `None`.
-    pub max_tokens: Option<usize>,
-
-    /// Tokens to stop at. Default `vec![]`.
-    pub stop_tokens: Vec<Token>,
-
-    /// See [module documentation](crate::inference#lock-step-mode). Default
-    /// `false`.
-    pub lock_step: bool,
-
-    /// Reload the grammar after sampling the response. Default: `true`.
-    pub reload_grammar: bool,
-}
-
-impl Default for SamplingOptions {
-    fn default() -> Self {
-        Self {
-            max_tokens: None,
-            stop_tokens: vec![],
-            lock_step: false,
-            reload_grammar: true,
-        }
-    }
-}
 
 /// Inference session
 #[derive(Clone)]
@@ -558,7 +527,6 @@ impl<'sequence, Output: FromToken> Stream for SequenceStream<'sequence, Output> 
         }
     }
 }
-
 
 /*
 #[cfg(test)]

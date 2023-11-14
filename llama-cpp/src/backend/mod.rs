@@ -111,9 +111,9 @@ pub const DEFAULT_SEED: u32 = llama_cpp_sys::llama_define_default_seed;
 
 const DEFAULT_N_THREADS: OnceCell<u32> = OnceCell::new();
 
-/// Default number of threads. This returns the number of physical cores, as reported by the [num_cpus](https://docs.rs/num_cpus/latest/num_cpus/) crate.
+/// Default number of threads. This returns the number of cores, as reported by the [num_cpus](https://docs.rs/num_cpus/latest/num_cpus/) crate.
 pub fn default_n_threads() -> u32 {
-    *DEFAULT_N_THREADS.get_or_init(|| num_cpus::get_physical() as _)
+    *DEFAULT_N_THREADS.get_or_init(|| num_cpus::get() as _)
 }
 
 unsafe extern "C" fn llama_log_callback(

@@ -27,7 +27,7 @@ use super::{
 
 #[derive(Clone, Debug)]
 pub struct ModelParameters {
-    pub n_gpu_layers: u32,
+    pub n_gpu_layers: Option<u32>,
     pub main_gpu: u32,
     pub tensor_split: Option<[f32; MAX_DEVICES]>,
     pub vocab_only: bool,
@@ -46,7 +46,7 @@ impl ModelParameters {
         progress_callback_user_data: *mut c_void,
     ) -> llama_cpp_sys::llama_model_params {
         llama_cpp_sys::llama_model_params {
-            n_gpu_layers: self.n_gpu_layers as i32,
+            n_gpu_layers: self.n_gpu_layers.map(|n| n as i32).unwrap_or(-1),
             main_gpu: self.main_gpu as i32,
             tensor_split: self
                 .tensor_split
@@ -65,7 +65,7 @@ impl ModelParameters {
 impl Default for ModelParameters {
     fn default() -> Self {
         Self {
-            n_gpu_layers: 0,
+            n_gpu_layers: None,
             main_gpu: 0,
             tensor_split: None,
             vocab_only: false,

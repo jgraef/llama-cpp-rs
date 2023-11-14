@@ -559,6 +559,7 @@ impl<'sequence, Output: FromToken> Stream for SequenceStream<'sequence, Output> 
     }
 }
 
+
 /*
 #[cfg(test)]
 mod tests {

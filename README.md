@@ -48,7 +48,7 @@ Examples are located in `examples/`. They are standalone crates.
 
 ```rust
 // load model asynchronously
-let model = ModelLoader::load(&model_path, Default::default())
+let model = ModelLoader::load(model_path, Default::default())
     .wait_for_model()
     .await?;
 
@@ -57,12 +57,21 @@ let prompt = "The capital of France is";
 print!("{}", prompt);
 stdout().flush()?;
 
-// create a session and feed prompt to it
-let mut session = Session::new(model, Default::default());
-session.push_text(&prompt, true, false);
+// create an inference session.
+let session = Session::from_model(model, Default::default());
+
+// create a sequence and feed prompt to it.
+let mut sequence = session.sequence();
+sequence
+    .push(Tokenize {
+        text: prompt,
+        add_bos: true,
+        allow_special: false,
+    })
+    .await?;
 
 // create a response stream from it
-let stream = session.pieces(None, [], false);
+let stream = inference.stream::<String>(Default::default());
 pin_mut!(stream);
 
 // stream LLM output piece by piece

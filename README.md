@@ -41,6 +41,8 @@ Both [Tokio][2] and [async-std][3] are supported. You choose which one is used b
  - [x] tokio runtime
  - [x] async-std runtime
  - [ ] API server
+ - [ ] Sliding context
+ - [ ] Prompt templates
 
 ## Example
 

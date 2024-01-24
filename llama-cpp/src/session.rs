@@ -107,8 +107,18 @@ pub struct Session {
 impl Session {
     /// Creates a new session from a [`Context`].
     pub fn from_context(context: Context) -> Self {
+        let (tx, rx) = mpsc::unbounded::channel();
+        let model = context.model().clone();
+
+        // spawn thread that runs the sync llama code
+        spawn_blocking(move || context_thread(context, rx));
+
         Self {
-            handle: ContextHandle::new(context),
+            handle: ContextHandle {
+                model,
+                tx_command: tx,
+                next_sequence_id: Arc::new(AtomicI32::new(0)),
+            },
         }
     }
 
@@ -215,20 +225,6 @@ struct ContextHandle {
 }
 
 impl ContextHandle {
-    fn new(context: Context) -> Self {
-        let (tx, rx) = mpsc::unbounded::channel();
-        let model = context.model().clone();
-
-        // spawn thread that runs the sync llama code
-        spawn_blocking(move || context_thread(context, rx));
-
-        Self {
-            model,
-            tx_command: tx,
-            next_sequence_id: Arc::new(AtomicI32::new(0)),
-        }
-    }
-
     fn new_sequence_id(&self) -> SeqId {
         self.next_sequence_id.fetch_add(1, Ordering::SeqCst)
     }

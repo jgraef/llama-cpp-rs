@@ -164,7 +164,7 @@ async fn generate(
         .await?;
 
     // split sequence
-    let mut sequences = (1..parallel).map(|_| sequence.clone()).collect::<Vec<_>>();
+    let mut sequences = (1..parallel).map(|_| sequence.fork()).collect::<Vec<_>>();
     sequences.push(sequence);
 
     // sample in parallel

@@ -139,6 +139,10 @@ impl Session {
     pub fn sequence(&self) -> Sequence {
         Sequence::new(self.handle.clone())
     }
+
+    pub fn model(&self) -> Model {
+        self.handle.model.clone()
+    }
 }
 
 /// A single text sequence. This can be expanded with your own text using
@@ -196,24 +200,22 @@ impl Sequence {
 
         SequenceStream::new(self)
     }
-}
 
-impl Drop for Sequence {
-    fn drop(&mut self) {
-        self.handle.send_command_unckecked(Command::DeleteSequence {
-            sequence_id: self.sequence_id,
-        })
-    }
-}
-
-impl Clone for Sequence {
-    fn clone(&self) -> Self {
+    pub fn fork(&self) -> Sequence {
         let sequence = Self::new(self.handle.clone());
         self.handle.send_command(Command::CopySequence {
             from_sequence_id: self.sequence_id,
             to_sequence_id: sequence.sequence_id,
         });
         sequence
+    }
+}
+
+impl Drop for Sequence {
+    fn drop(&mut self) {
+        self.handle.send_command_unchecked(Command::DeleteSequence {
+            sequence_id: self.sequence_id,
+        })
     }
 }
 
@@ -238,7 +240,7 @@ impl ContextHandle {
             .expect("context thread terminated")
     }
 
-    fn send_command_unckecked(&self, command: Command) {
+    fn send_command_unchecked(&self, command: Command) {
         self.tx_command.send(command).ok();
     }
 }
@@ -467,7 +469,7 @@ impl<'sequence> Drop for TokenStream<'sequence> {
     fn drop(&mut self) {
         self.sequence
             .handle
-            .send_command_unckecked(Command::StopSampling {
+            .send_command_unchecked(Command::StopSampling {
                 sequence_id: self.sequence.sequence_id,
             });
     }

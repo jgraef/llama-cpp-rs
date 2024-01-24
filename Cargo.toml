@@ -2,13 +2,16 @@
 members = [
   "llama-cpp",
   "llama-cpp-cli",
+  "llama-cpp-server",
   "llama-cpp-sys",
   "examples/*",
+  
 ]
 # only build and check main crates by default
 default-members = [
   "llama-cpp",
   "llama-cpp-cli",
+  "llama-cpp-server",
   "llama-cpp-sys",
 ]
 resolver = "2"

@@ -117,14 +117,12 @@ pub struct Context {
     /// still have a context to it.
     model: Model,
 
-    /// The number of tokens in the last batch_decode
+    /// The number of tokens in the last batch_decode. We need to know this
+    /// because some buffers' size depend on it.
     n_tokens: u32,
 
     /// Context size
     n_ctx: u32,
-
-    /// Total number of tokens decoded
-    n_past: u32,
 
     /// Maximum batch size
     n_batch_max: u32,
@@ -160,13 +158,12 @@ impl Context {
             model,
             n_tokens: 0,
             n_ctx,
-            n_past: 0,
             n_batch_max,
         }
     }
 
-    pub fn batched(&mut self) -> Batched {
-        Batched::new(self, self.n_batch_max)
+    pub fn manager(&mut self) -> ContextManager {
+        ContextManager::new(self, std::cmp::min(self.n_ctx, self.n_batch_max))
     }
 
     /// Return the model this context uses.
@@ -180,10 +177,6 @@ impl Context {
 
     pub fn n_batch_max(&self) -> u32 {
         self.n_batch_max
-    }
-
-    pub fn n_past(&self) -> u32 {
-        self.n_past
     }
 
     /// Returns the internal state as bytes.
@@ -258,9 +251,6 @@ impl Context {
         // this (and n_vocab)
         self.n_tokens = batch.data.n_tokens as _;
 
-        // we need to know when we run out of context.
-        self.n_past += batch.data.n_tokens as u32;
-
         let ret = unsafe { llama_cpp_sys::llama_decode(self.handle, batch.data) };
 
         match ret {
@@ -272,7 +262,7 @@ impl Context {
         }
     }
 
-    pub fn swap(&mut self, n_keep: u32) -> u32 {
+    /*fn swap(&mut self, n_keep: u32) -> u32 {
         /* taken from llama.cpp/examples/main/main.cpp
 
             const int n_left    = n_past - params.n_keep - 1;
@@ -327,7 +317,7 @@ impl Context {
         else {
             0
         }
-    }
+    }*/
 
     /// Returns the logits for the i-th token that was decoded with the last
     /// batch.
@@ -415,13 +405,13 @@ struct SequenceState {
 }
 
 /// Helper to do batched decoding on a [`Context`].
-pub struct Batched<'a> {
+pub struct ContextManager<'a> {
     context: &'a mut Context,
     batch: Batch,
     sequences: HashMap<SeqId, SequenceState>,
 }
 
-impl<'a> Batched<'a> {
+impl<'a> ContextManager<'a> {
     pub fn new(context: &'a mut Context, batch_size: u32) -> Self {
         // `n_seq_max` specifies how many sequences a token can belong to, not how many
         // sequences we can have.
@@ -486,6 +476,10 @@ impl<'a> Batched<'a> {
     }
 
     pub fn decode(&mut self) -> Result<(), DecodeError> {
+        if self.batch.is_empty() {
+            return Ok(());
+        }
+
         // since we constructed the batch it should be safe to decode it.
         unsafe { self.context.decode_batch_unchecked(&self.batch)? };
 
@@ -524,6 +518,8 @@ impl<'a> Batched<'a> {
     }
 
     pub fn sample(&mut self, seq_id: SeqId, sampler: &mut Sampler) -> Result<Token, DecodeError> {
+        self.decode()?;
+
         // get last logits and discard the rest.
         let logits = self
             .take_logits(seq_id)
@@ -565,6 +561,15 @@ impl<'a> Batched<'a> {
     }
 }
 
+impl<'a> Drop for ContextManager<'a> {
+    fn drop(&mut self) {
+        // clear kv cache
+        unsafe {
+            llama_cpp_sys::llama_kv_cache_tokens_rm(self.context.handle, -1, -1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use lipsum::lipsum;
@@ -581,11 +586,14 @@ mod tests {
         },
     };
 
-    fn sample_until_eos<'a>(batched: &mut Batched<'a>, sampler: &mut Sampler) -> Vec<Token> {
+    fn sample_until_eos<'a>(
+        context_manager: &mut ContextManager<'a>,
+        sampler: &mut Sampler,
+    ) -> Vec<Token> {
         let mut tokens = vec![];
         loop {
-            let token = batched.sample(0, sampler).unwrap();
-            if token == batched.context.model().token_eos() {
+            let token = context_manager.sample(0, sampler).unwrap();
+            if token == context_manager.context.model().token_eos() {
                 break;
             }
             tokens.push(token);
@@ -597,8 +605,8 @@ mod tests {
     #[should_panic]
     fn it_rejects_invalid_tokens() {
         let mut context = context();
-        let mut decoder = context.batched();
-        decoder.push_token(i32::MAX, 0, false).unwrap();
+        let mut context_manager = context.manager();
+        context_manager.push_token(i32::MAX, 0, false).unwrap();
     }
 
     #[test]
@@ -623,9 +631,10 @@ mod tests {
             ..Default::default()
         });
 
-        let mut batched = context.batched();
-        batched.push_tokens(&tokens, 0, false).unwrap();
-        batched.decode().unwrap();
+        let mut context_manager = context.manager();
+        context_manager.push_tokens(&tokens, 0, false).unwrap();
+        context_manager.decode().unwrap();
+        drop(context_manager);
 
         let embeddings = context
             .get_embeddings()
@@ -640,11 +649,11 @@ mod tests {
         println!("n_ctx = {}", context.n_ctx());
 
         let tokens = context.model().tokenize(&lipsum(512), true, false);
-        let mut batched = Batched::new(&mut context, 64);
-        batched.push_tokens(&tokens, 0, true).unwrap();
+        let mut context_manager = ContextManager::new(&mut context, 64);
+        context_manager.push_tokens(&tokens, 0, true).unwrap();
 
         let mut sampler = Sampler::new(Default::default());
-        let tokens = sample_until_eos(&mut batched, &mut sampler);
+        let tokens = sample_until_eos(&mut context_manager, &mut sampler);
         println!("{:?}", tokens);
         //assert_eq!(token, 23);
     }
@@ -655,10 +664,10 @@ mod tests {
 
         let gen = |batch_size: u32| {
             let mut context = context();
-            let mut batched = Batched::new(&mut context, batch_size);
-            batched.push_tokens(&tokens, 0, true).unwrap();
+            let mut context_manager = ContextManager::new(&mut context, batch_size);
+            context_manager.push_tokens(&tokens, 0, true).unwrap();
             let mut sampler = Sampler::new(Default::default());
-            sample_until_eos(&mut batched, &mut sampler)
+            sample_until_eos(&mut context_manager, &mut sampler)
         };
 
         let output1 = gen(512);

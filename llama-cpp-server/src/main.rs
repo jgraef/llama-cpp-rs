@@ -3,14 +3,10 @@ mod api;
 use std::path::PathBuf;
 
 use axum::{
-    routing,
-    Router,
+    response::Html, routing, Router
 };
 use color_eyre::eyre::Error;
-use llama_cpp::{
-    loader::ModelLoader,
-    session::Session,
-};
+use llama_cpp::loader::ModelLoader;
 use structopt::StructOpt;
 use tokio::net::TcpListener;
 use utoipa::OpenApi;
@@ -31,13 +27,13 @@ impl Args {
         let model = ModelLoader::load(&self.model, Default::default())
             .wait_for_model()
             .await?;
-        let context = model.context(&Default::default());
-        let session = Session::from_context(context);
 
         let app = Router::new()
             .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+            .route("/", routing::get(index))
+            .route("/status", routing::get(api::status))
             .route("/generate", routing::post(api::generate))
-            .with_state(session);
+            .with_state(model);
 
         tracing::info!("listening on: http://{}", self.address);
         let listener = TcpListener::bind(self.address).await?;
@@ -45,6 +41,21 @@ impl Args {
 
         Ok(())
     }
+}
+
+async fn index() -> Html<&'static str> {
+    Html(r#"
+<html>
+    <head>
+        <title>llama-cpp-server</title>
+    </head>
+    <body>
+        API server built with <a href="https://github.com/jgraef/llama-cpp-rs">llama-cpp-rs</a>.<br>
+
+        <a href="/swagger-ui">Swagger UI</a>
+    </body>
+</html>
+    "#)
 }
 
 #[tokio::main]

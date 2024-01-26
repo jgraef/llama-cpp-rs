@@ -18,6 +18,7 @@ use llama_cpp::{
         context::ContextParameters,
         sampling::{
             Sampler,
+            SamplingMode,
             SamplingParameters,
         },
         system_info,
@@ -38,13 +39,19 @@ struct ModelOptions {
 
     #[structopt(short, long)]
     grammar: Option<PathBuf>,
+
+    #[structopt(long)]
+    n_ctx: Option<u32>,
+
+    #[structopt(long)]
+    temperature: Option<f32>,
 }
 
 impl ModelOptions {
     async fn session(&self) -> Result<Session, Error> {
         let context_parameters = ContextParameters {
             seed: self.seed,
-            n_ctx: Some(512),
+            n_ctx: self.n_ctx,
             ..Default::default()
         };
 
@@ -68,7 +75,15 @@ impl ModelOptions {
 
         let sampling_parameters = SamplingParameters {
             grammar,
-            ..Default::default()
+            repetition_penalties: None,
+            mode: SamplingMode::Temperature {
+                temperature: self.temperature.unwrap_or(0.8),
+                top_k: 40,
+                top_p: 0.95,
+                n_probs: 0,
+                tfs_z: 1.0,
+                typical_p: 1.0,
+            },
         };
         Ok(Sampler::new(sampling_parameters))
     }

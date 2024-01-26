@@ -257,7 +257,7 @@ struct SequenceSamplingState {
 }
 
 fn context_thread(mut context: Context, mut rx: mpsc::unbounded::Receiver<Command>) {
-    let mut batched = context.batched();
+    let mut context_manager = context.manager();
     let mut sequences: HashMap<SeqId, SequenceState> = HashMap::new();
     let mut command_buf = vec![];
     let mut sample_later = vec![];
@@ -273,7 +273,7 @@ fn context_thread(mut context: Context, mut rx: mpsc::unbounded::Receiver<Comman
             match command {
                 Command::DeleteSequence { sequence_id } => {
                     sequences.remove(&sequence_id);
-                    batched.delete_sequence(sequence_id);
+                    context_manager.delete_sequence(sequence_id);
                 }
                 Command::PushTokens {
                     sequence_id,
@@ -289,7 +289,7 @@ fn context_thread(mut context: Context, mut rx: mpsc::unbounded::Receiver<Comman
                         // `Sequence::push_tokens`.
                         unsafe {
                             if let Err(e) =
-                                batched.push_token_unchecked(*token, sequence_id, is_last)
+                                context_manager.push_token_unchecked(*token, sequence_id, is_last)
                             {
                                 result = Err(e);
                                 break;
@@ -339,14 +339,14 @@ fn context_thread(mut context: Context, mut rx: mpsc::unbounded::Receiver<Comman
 
         // decode batch if we need to sample or copy kv cache.
         let decode_error = (!sample_later.is_empty() || !copy_later.is_empty())
-            .then(|| batched.decode().err())
+            .then(|| context_manager.decode().err())
             .flatten();
 
         for (from_sequence_id, to_sequence_id) in copy_later.drain(..) {
             // note: currently a sequence can't be split while sampling.
             let from_sequence = sequences.get(&from_sequence_id).expect("no sequence");
             sequences.insert(to_sequence_id, from_sequence.clone());
-            batched.copy_sequence(from_sequence_id, to_sequence_id);
+            context_manager.copy_sequence(from_sequence_id, to_sequence_id);
         }
 
         for (sequence_id, tx_result) in sample_later.drain(..) {
@@ -357,7 +357,8 @@ fn context_thread(mut context: Context, mut rx: mpsc::unbounded::Receiver<Comman
                 tx_result.send(Err(decode_error)).ok();
             }
             else {
-                let sample_result = batched.sample(sequence_id, &mut sampling_state.sampler);
+                let sample_result =
+                    context_manager.sample(sequence_id, &mut sampling_state.sampler);
                 tx_result.send(sample_result).ok();
             }
         }

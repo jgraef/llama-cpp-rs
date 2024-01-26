@@ -12,11 +12,18 @@ use axum::{
 };
 use futures::{
     Stream,
-    StreamExt,
     TryStreamExt,
 };
 use llama_cpp::{
-    backend::sampling::Sampler,
+    backend::{
+        context::ContextParameters,
+        model::Model,
+        sampling::{
+            Sampler,
+            SamplingMode,
+            SamplingParameters,
+        },
+    },
     session::{
         Sequence,
         Session,
@@ -38,7 +45,7 @@ use utoipa::{
         generate
     ),
     components(
-        //schemas(GenerateRequest, GenerateResponse)
+        schemas(GenerateRequest, GenerateResponse)
     ),
     tags(
         //(name = "todo", description = "Todo items management API")
@@ -66,6 +73,12 @@ impl From<llama_cpp::Error> for ApiError {
     }
 }
 
+impl From<llama_cpp::grammar::Error> for ApiError {
+    fn from(value: llama_cpp::grammar::Error) -> Self {
+        Self::Internal(value.to_string())
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status_code(), Json(self)).into_response()
@@ -77,6 +90,12 @@ pub struct GenerateRequest {
     input: String,
     #[serde(default)]
     stream: bool,
+    temperature: Option<f32>,
+    #[serde(default)]
+    greedy: bool,
+    grammar: Option<String>,
+    seed: Option<u32>,
+    n_ctx: Option<u32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -94,10 +113,30 @@ pub struct GenerateResponse {
     )
 )]
 pub async fn generate(
-    State(session): State<Session>,
+    State(model): State<Model>,
     request: Json<GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let sampler = Sampler::new(Default::default());
+    let mut context_parameters = ContextParameters::default();
+    context_parameters.seed = request.seed;
+    context_parameters.n_ctx = request.n_ctx;
+    let context = model.context(&context_parameters);
+    let session = Session::from_context(context);
+
+    let mut sampling_parameters = SamplingParameters::default();
+    if let Some(grammar) = &request.grammar {
+        let grammar = llama_cpp::grammar::parse_and_compile(grammar)?;
+        sampling_parameters.grammar = Some(grammar);
+    }
+    if let Some(t) = request.temperature {
+        match &mut sampling_parameters.mode {
+            SamplingMode::Temperature { temperature, .. } => *temperature = t,
+            _ => {}
+        }
+    }
+    if request.greedy {
+        sampling_parameters.mode = SamplingMode::Greedy;
+    }
+    let sampler = Sampler::new(sampling_parameters);
 
     let mut sequence = session.sequence();
     sequence.push(BeginOfSequence).await?;
@@ -127,4 +166,24 @@ pub async fn generate(
 
         Ok(Json(GenerateResponse { output }).into_response())
     }
+}
+
+
+#[derive(Debug, Serialize)]
+pub struct StatusResponse {
+    system_info: String,
+}
+
+/// Returns server status information.
+#[utoipa::path(
+    get,
+    path = "/status",
+    responses(
+        (status = 200, body = StatusResponse)
+    )
+)]
+pub async fn status(State(_model): State<Model>) -> Json<StatusResponse> {
+    Json(StatusResponse {
+        system_info: llama_cpp::backend::system_info()
+    })
 }

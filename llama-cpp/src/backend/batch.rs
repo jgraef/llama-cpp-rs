@@ -68,6 +68,10 @@ impl Batch {
         self.data.n_tokens = 0;
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.data.n_tokens == 0
+    }
+
     pub fn is_full(&self) -> bool {
         self.data.n_tokens as u32 == self.n_tokens_max
     }
